@@ -5,7 +5,7 @@ go 1.18
 require (
 	cuelang.org/go v0.4.3
 	github.com/cucumber/godog v0.12.5
-	github.com/cyberphone/json-canonicalization v0.0.0-20210823021906-dc406ceaf94b
+	github.com/cyberphone/json-canonicalization v0.0.0-20220623050100-57a0ce2678a7
 	github.com/daixiang0/gci v0.8.0
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-git/go-billy/v5 v5.3.1
