@@ -22,7 +22,7 @@ require (
 	github.com/open-policy-agent/conftest v0.34.0
 	github.com/pkg/diff v0.0.0-20210226163009-20ebb0f2a09e
 	github.com/pkg/errors v0.9.1
-	github.com/redhat-appstudio/managed-gitops/appstudio-shared v0.0.0-20220615221006-a71c1aa4b97f
+	github.com/redhat-appstudio/managed-gitops/appstudio-shared v0.0.0-20220927160406-864c0c9c5a74
 	github.com/sigstore/cosign v1.12.1
 	github.com/sigstore/rekor v0.12.1-0.20220915152154-4bb6f441c1b2
 	github.com/sigstore/sigstore v1.4.2
