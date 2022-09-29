@@ -24,7 +24,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/redhat-appstudio/managed-gitops/appstudio-shared v0.0.0-20220615221006-a71c1aa4b97f
 	github.com/sigstore/cosign v1.12.1
-	github.com/sigstore/rekor v0.12.1-0.20220915152154-4bb6f441c1b2
+	github.com/sigstore/rekor v0.12.2
 	github.com/sigstore/sigstore v1.4.2
 	github.com/sirupsen/logrus v1.9.0
 	github.com/spf13/afero v1.9.2
@@ -200,7 +200,7 @@ require (
 	github.com/go-openapi/validate v0.22.0 // indirect
 	github.com/go-playground/locales v0.14.0 // indirect
 	github.com/go-playground/universal-translator v0.18.0 // indirect
-	github.com/go-playground/validator/v10 v10.11.0 // indirect
+	github.com/go-playground/validator/v10 v10.11.1 // indirect
 	github.com/go-toolsmith/astcast v1.0.0 // indirect
 	github.com/go-toolsmith/astcopy v1.0.1 // indirect
 	github.com/go-toolsmith/astequal v1.0.2 // indirect
