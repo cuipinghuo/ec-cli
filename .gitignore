@@ -172,9 +172,3 @@ tags
 
 # Last persisted acceptance test run information
 internal/acceptance/.persisted
-
-# Antora cache
-.cache
-# Rendered documentation output
-website/public
-node_modules

@@ -14,12 +14,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package kubernetes
 
 import (
 	"context"
-	"errors"
-	"io/ioutil"
+	"os"
 	"path"
 	"testing"
 
@@ -27,11 +28,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/fake"
 )
 
-var fakeClient client.Client
+var fakeClient dynamic.Interface
 
 var testECP = ecc.EnterpriseContractPolicy{
 	TypeMeta: v1.TypeMeta{
@@ -43,15 +44,28 @@ var testECP = ecc.EnterpriseContractPolicy{
 		Namespace: "test",
 	},
 	Spec: ecc.EnterpriseContractPolicySpec{
-		Sources: []ecc.PolicySource{
+		Sources: []ecc.Source{
 			{
-				GitRepository: &ecc.GitPolicySource{
-					Repository: "test_policies",
-				},
+				Policy: []string{"test_policies"},
 			},
 		},
 	},
 }
+
+var testKubeconfig = []byte(`
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://api.test
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    namespace: test
+  name: test-context
+current-context: test-context
+`)
 
 func init() {
 	scheme := runtime.NewScheme()
@@ -60,7 +74,7 @@ func init() {
 		panic(err)
 	}
 
-	fakeClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(&testECP).Build()
+	fakeClient = fake.NewSimpleDynamicClient(scheme, &testECP)
 }
 
 func Test_FetchEnterpriseContractPolicy(t *testing.T) {
@@ -94,7 +108,7 @@ func Test_FetchEnterpriseContractPolicy(t *testing.T) {
 			}
 
 			kubeconfigFile := path.Join(t.TempDir(), "KUBECONFIG")
-			err := ioutil.WriteFile(kubeconfigFile, testKubeconfig, 0777)
+			err := os.WriteFile(kubeconfigFile, testKubeconfig, 0777)
 			assert.NoError(t, err)
 			t.Setenv("KUBECONFIG", kubeconfigFile)
 
@@ -115,33 +129,9 @@ func Test_FetchEnterpriseContractPolicy(t *testing.T) {
 	}
 }
 
-func Test_FailureToAddScheme(t *testing.T) {
-	expected := errors.New("expected")
+func Test_FailureToCreateClient(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/nonexistant")
+	_, err := createK8SClient()
 
-	def := ecc.AddToScheme
-	ecc.AddToScheme = func(s *runtime.Scheme) error {
-		return expected
-	}
-	defer func() {
-		ecc.AddToScheme = def
-	}()
-
-	_, err := createControllerRuntimeClient()
-
-	assert.EqualError(t, err, "expected")
+	assert.EqualError(t, err, "invalid configuration: no configuration has been provided, try setting KUBERNETES_MASTER environment variable")
 }
-
-var testKubeconfig = []byte(`
-apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: https://api.test
-  name: test-cluster
-contexts:
-- context:
-    cluster: test-cluster
-    namespace: test
-  name: test-context
-current-context: test-context
-`)

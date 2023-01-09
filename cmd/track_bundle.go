@@ -18,110 +18,125 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"os"
 
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	hd "github.com/MakeNowJust/heredoc"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
-	"github.com/tektoncd/pipeline/pkg/remote/oci"
-
-	"github.com/hacbs-contract/ec-cli/internal/image"
-	"github.com/hacbs-contract/ec-cli/internal/tracker"
 )
 
-type trackBundleFn func(context.Context, []string, string, tracker.Collector) ([]byte, error)
+type trackBundleFn func(context.Context, afero.Fs, []string, string, bool) ([]byte, error)
 
 func trackBundleCmd(track trackBundleFn) *cobra.Command {
 	var data = struct {
-		Bundles    []string
-		Input      string
-		Replace    bool
-		OutputFile string
-	}{}
+		bundles    []string
+		input      string
+		prune      bool
+		replace    bool
+		outputFile string
+	}{
+		prune: true,
+	}
 
 	cmd := &cobra.Command{
 		Use:   "bundle",
 		Short: "Record tracking information about Tekton bundles",
-		Long: `Record tracking information about Tekton bundles
 
-Given one or more Tekton Bundles, categorize each as "pipeline-bundles",
-"tekton-bundles", or both. Then, generate a YAML represenation of this
-categorization.
+		Long: hd.Doc(`
+			Record tracking information about Tekton bundles
 
-Each Tekton Bundle is expected to be a proper OCI image reference. They
-may contain a tag, a digest, or both. If a digest is not provided, this
-command will query the registry to determine its value. Either a tag
-or a digest is required.
+			Given one or more Tekton Bundles, categorize each as "pipeline-bundles",
+			"tekton-bundles", or both. Then, generate a YAML represenation of this
+			categorization.
 
-The output is meant to assist enforcement of policies that ensure the
-most recent Tekton Bundle is used. As such, each entry contains an
-"effective_on" date which is set to 30 days from today. This indicates
-the Tekton Bundle usage should be updated within that period.`,
-		Example: `Track multiple bundles:
+			Each Tekton Bundle is expected to be a proper OCI image reference. They
+			may contain a tag, a digest, or both. If a digest is not provided, this
+			command will query the registry to determine its value. Either a tag
+			or a digest is required.
 
-  ec track bundle --bundle <IMAGE1> --bundle <IMAGE2>
+			The output is meant to assist enforcement of policies that ensure the
+			most recent Tekton Bundle is used. As such, each entry contains an
+			"effective_on" date which is set to 30 days from today. This indicates
+			the Tekton Bundle usage should be updated within that period.
 
-Save tracking information into a new tracking file:
+			Additionally, the common set of Tasks referenced by all "important"
+			Pipeline definitions are deemed required and displayed as such. An
+			"important" Pipeline definition is defined as one that does NOT include
+			the label "skip-hacbs-test" set to the value "true".
 
-  ec track bundle --bundle <IMAGE1> --output <path/to/new/file>
+			If --prune is set, on by default, non-acceptable entries are removed.
+			Any entry with an effective_on date in the future, and the entry with
+			the most recent effective_on date *not* in the future are considered
+			acceptable. This applies to bundles and to required tasks.
+		`),
 
-Extend an existing tracking file with a new bundle:
+		Example: hd.Doc(`
+			Track multiple bundles:
 
-  ec track bundle --bundle <IMAGE1> --input <path/to/input/file>
+			  ec track bundle --bundle <IMAGE1> --bundle <IMAGE2>
 
-Extend an existing tracking file with a new bundle and save changes:
+			Save tracking information into a new tracking file:
 
-  ec track bundle --bundle <IMAGE1> --input <path/to/input/file> --replace`,
+			  ec track bundle --bundle <IMAGE1> --output <path/to/new/file>
+
+			Extend an existing tracking file with a new bundle:
+
+			  ec track bundle --bundle <IMAGE1> --input <path/to/input/file>
+
+			Extend an existing tracking file with a new bundle and save changes:
+
+			  ec track bundle --bundle <IMAGE1> --input <path/to/input/file> --replace
+
+			Skip pruning for unacceptable entries:
+
+			  ec track bundle --bundle <IMAGE1> --input <path/to/input/file> --prune=false
+		`),
+
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			fs := fs(cmd.Context())
 
-			out, err := track(cmd.Context(), data.Bundles, data.Input, tektonBundleCollector)
+			out, err := track(cmd.Context(), fs, data.bundles, data.input, data.prune)
 			if err != nil {
 				return err
 			}
 
-			if data.OutputFile == "" {
-				fmt.Println(string(out))
+			if data.outputFile == "" {
+				_, err = cmd.OutOrStdout().Write(out)
 			} else {
-				f, err := os.Create(data.OutputFile)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				_, err = f.Write(out)
-				if err != nil {
-					return err
-				}
+				err = afero.WriteFile(fs, data.outputFile, out, 0666)
 			}
 
-			if data.Input != "" && data.Replace {
-				stat, err := os.Stat(data.Input)
-				if err != nil {
-					return err
-				}
-				f, err := os.OpenFile(data.Input, os.O_RDWR, stat.Mode())
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				_, err = f.Write(out)
-				if err != nil {
-					return err
-				}
+			if err != nil {
+				return
 			}
 
-			return nil
+			if data.input != "" && data.replace {
+				var perm os.FileMode
+				if stat, err := fs.Stat(data.input); err != nil {
+					return err
+				} else {
+					perm = stat.Mode()
+				}
+
+				err = afero.WriteFile(fs, data.input, out, perm)
+			}
+
+			return
 		},
 	}
 
-	cmd.Flags().StringVarP(&data.Input, "input", "i", data.Input, "existing tracking file")
+	cmd.Flags().StringVarP(&data.input, "input", "i", data.input, "existing tracking file")
 
-	cmd.Flags().StringSliceVarP(&data.Bundles, "bundle", "b", data.Bundles,
+	cmd.Flags().StringSliceVarP(&data.bundles, "bundle", "b", data.bundles,
 		"bundle image reference to track - may be used multiple times (required)")
 
-	cmd.Flags().BoolVarP(&data.Replace, "replace", "r", data.Replace, "write changes to input file")
+	cmd.Flags().BoolVarP(&data.prune, "prune", "p", data.prune,
+		"remove entries that are no longer acceptable, i.e. a newer entry already effective exists")
 
-	cmd.Flags().StringVarP(&data.OutputFile, "output", "o", data.OutputFile,
+	cmd.Flags().BoolVarP(&data.replace, "replace", "r", data.replace, "write changes to input file")
+
+	cmd.Flags().StringVarP(&data.outputFile, "output", "o", data.outputFile,
 		"write modified tracking file to a file. Use empty string for stdout, default behavior")
 
 	if err := cmd.MarkFlagRequired("bundle"); err != nil {
@@ -129,32 +144,4 @@ Extend an existing tracking file with a new bundle and save changes:
 	}
 
 	return cmd
-}
-
-var fetchImage = remote.Image
-
-func tektonBundleCollector(ctx context.Context, ref image.ImageReference) ([]string, error) {
-	img, err := fetchImage(ref.Ref(), remote.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	manifest, err := img.Manifest()
-	if err != nil {
-		return nil, err
-	}
-
-	collectionsMap := map[string]bool{}
-	for _, layer := range manifest.Layers {
-		if kind, ok := layer.Annotations[oci.KindAnnotation]; ok {
-			collectionsMap[kind] = true
-		}
-	}
-
-	collections := make([]string, 0, len(collectionsMap))
-	for c := range collectionsMap {
-		collections = append(collections, c)
-	}
-
-	return collections, nil
 }

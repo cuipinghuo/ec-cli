@@ -21,7 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -62,7 +62,7 @@ func createTektonBundle(ctx context.Context, name string, data *godog.Table) (co
 			return ctx, err
 		}
 
-		layer := stream.NewLayer(ioutil.NopCloser(&data))
+		layer := stream.NewLayer(io.NopCloser(&data))
 
 		var err error
 		img, err = mutate.Append(img, mutate.Addendum{
@@ -92,11 +92,37 @@ func createTektonBundle(ctx context.Context, name string, data *godog.Table) (co
 }
 
 func contentFor(kind, name string) []byte {
+	switch kind {
+	case "Pipeline":
+		return contentForPipeline(name)
+	case "Task":
+		return contentForTask(name)
+	default:
+		panic(fmt.Sprintf("Unexpected kind %q", kind))
+	}
+}
+
+func contentForPipeline(name string) []byte {
 	content := fmt.Sprintf(`apiVersion: tekton.dev/%s
-kind: %s
+kind: Pipeline
 metadata:
-	name: %s
-spec:`, version, kind, name)
+  name: %s
+spec:
+  tasks:
+  - taskRef:
+      kind: Task
+      name: git-clone
+`, version, name)
+
+	return []byte(content)
+}
+
+func contentForTask(name string) []byte {
+	content := fmt.Sprintf(`apiVersion: tekton.dev/%s
+kind: Task
+metadata:
+  name: %s
+spec:`, version, name)
 
 	return []byte(content)
 }

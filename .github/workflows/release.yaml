@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ---
-name: Release ec CLI
+name: Release
 
 "on":
   push:
@@ -23,10 +23,15 @@ name: Release ec CLI
       - main
 
 jobs:
-  release-ec:
+  release:
 
     name: Release
     runs-on: ubuntu-latest
+
+    env:
+      IMAGE_REPO: quay.io/hacbs-contract/ec-cli
+      TAG: ${{ github.sha }}
+      TASK: task/0.1/verify-enterprise-contract.yaml
 
     steps:
       - uses: actions/checkout@v3
@@ -36,9 +41,12 @@ jobs:
         with:
           cache: true
           go-version-file: go.mod
+          cache-dependency-path: '**/go.sum'
 
       - name: Download go dependencies
-        run: go mod download
+        run: |
+          go mod download
+          go mod download -modfile internal/tools/go.mod
 
       - name: Build distribution
         run: make dist
@@ -60,7 +68,13 @@ jobs:
           git push -f --tags
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        # we're using our own fork with
+        # https://github.com/softprops/action-gh-release/pull/275 on top of it,
+        # seems to solve a number of issues:
+        # - https://github.com/softprops/action-gh-release/issues/268
+        # - https://github.com/softprops/action-gh-release/issues/265
+        # - https://github.com/softprops/action-gh-release/issues/263
+        uses: hacbs-contract/action-gh-release@v2
         with:
           prerelease: true
           name: Development snapshot
@@ -68,3 +82,15 @@ jobs:
           tag_name: snapshot
           generate_release_notes: true
           files: dist/*
+
+      - name: Registry login
+        run: podman login -u ${{ secrets.BUNDLE_PUSH_USER  }} -p ${{ secrets.BUNDLE_PUSH_PASS }} quay.io
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Create and push image
+        run: make dist-image-push IMAGE_TAG=$TAG IMAGE_REPO=$IMAGE_REPO
+
+      - name: Create and push the tekton bundle
+        run: make task-bundle-snapshot TASK_TAG=$TAG TASK=<( yq e ".spec.steps[].image? = \"$IMAGE_REPO:$TAG\"" $TASK)

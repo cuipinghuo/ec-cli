@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package kubernetes
 
 import (
@@ -93,6 +95,9 @@ current-context: test-context`,
 				kubeconfigFile, err := os.Create(kubeconfig)
 				assert.NoError(t, err)
 				defer kubeconfigFile.Close()
+				t.Cleanup(func() {
+					os.Remove(kubeconfig)
+				})
 				_, err = kubeconfigFile.WriteString(c.kubeconfig)
 				if err != nil {
 					t.Fatal(err)

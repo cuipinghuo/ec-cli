@@ -14,26 +14,28 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package tracker
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"os"
-	"path"
-	"reflect"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
+	hd "github.com/MakeNowJust/heredoc"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/leanovate/gopter"
-	"github.com/leanovate/gopter/arbitrary"
-	"github.com/leanovate/gopter/gen"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
-
-	"github.com/hacbs-contract/ec-cli/internal/image"
+	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	"github.com/tektoncd/pipeline/pkg/remote/oci"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 var sampleHashOne = v1.Hash{
@@ -46,12 +48,20 @@ var sampleHashTwo = v1.Hash{
 	Hex:       "a2c1615816029636903a8172775682e8bbb84c6fde8d74b6de1e198f19f95c72",
 }
 
+var sampleHashThree = v1.Hash{
+	Algorithm: "sha256",
+	Hex:       "284e3029cce3ae5ee0b05866100e300046359f53ae4c77fe6b34c05aa7a72cee",
+}
+
 var expectedEffectiveOn = effectiveOn().Format(time.RFC3339)
+
+var yesterday = time.Now().Add(time.Hour * 24 * -1).UTC().Format(time.RFC3339)
 
 func TestTrack(t *testing.T) {
 	tests := []struct {
 		name   string
 		urls   []string
+		prune  bool
 		output string
 		input  string
 	}{
@@ -61,15 +71,23 @@ func TestTrack(t *testing.T) {
 				"registry.com/repo:two@" + sampleHashTwo.String(),
 				"registry.com/repo:one@" + sampleHashOne.String(),
 			},
-			output: `pipeline-bundles:
-  registry.com/repo:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: one
-  - digest: ` + sampleHashTwo.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: two
-`,
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/repo:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: one
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: two
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
 		},
 		{
 			name: "multiple repos",
@@ -77,99 +95,338 @@ func TestTrack(t *testing.T) {
 				"registry.com/one:1.0@" + sampleHashOne.String(),
 				"registry.com/two:2.0@" + sampleHashTwo.String(),
 			},
-			output: `pipeline-bundles:
-  registry.com/one:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "1.0"
-  registry.com/two:
-  - digest: ` + sampleHashTwo.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "2.0"
-`,
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				  registry.com/two:
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "2.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
 		},
 		{
 			name: "update existing repo",
 			urls: []string{
 				"registry.com/repo:two@" + sampleHashTwo.String(),
 			},
-			input: `pipeline-bundles:
-  registry.com/repo:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: one
-`,
-			output: `pipeline-bundles:
-  registry.com/repo:
-  - digest: ` + sampleHashTwo.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: two
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: one
-`,
+			input: hd.Doc(
+				`---
+				pipeline-bundles:
+				  registry.com/repo:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: one
+			`),
+			output: hd.Doc(
+				`---
+				pipeline-bundles:
+				  registry.com/repo:
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: two
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: one
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
 		},
 		{
 			name: "update existing collection",
 			urls: []string{
 				"registry.com/two:2.0@" + sampleHashTwo.String(),
 			},
-			input: `pipeline-bundles:
-  registry.com/one:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "1.0"
-`,
-			output: `pipeline-bundles:
-  registry.com/one:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "1.0"
-  registry.com/two:
-  - digest: ` + sampleHashTwo.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "2.0"
-`,
+			input: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+			`),
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				  registry.com/two:
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "2.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
 		},
 		{
 			name: "create new collection",
 			urls: []string{
 				"registry.com/two:2.0@" + sampleHashTwo.String(),
 			},
-			input: `task-bundles:
-  registry.com/one:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "1.0"
-`,
-			output: `pipeline-bundles:
-  registry.com/two:
-  - digest: ` + sampleHashTwo.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "2.0"
-task-bundles:
-  registry.com/one:
-  - digest: ` + sampleHashOne.String() + `
-    effective_on: "` + expectedEffectiveOn + `"
-    tag: "1.0"
-`,
+			input: hd.Doc(`
+				task-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+			`),
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/two:
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "2.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+				task-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+			`),
+		},
+		{
+			name: "mixed tasks and pipelines",
+			urls: []string{
+				"registry.com/mixed:1.0@" + sampleHashOne.String(),
+			},
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+				task-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+			`),
+		},
+		{
+			name: "pipeline without tasks",
+			urls: []string{
+				"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(),
+			},
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/empty-pipeline:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks: []
+			`),
+		},
+		{
+			name: "pipeline without tasks and pipeline with tasks",
+			urls: []string{
+				"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(),
+				"registry.com/one:1.0@" + sampleHashOne.String(),
+			},
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/empty-pipeline:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
+		},
+		{
+			name: "pipeline with tasks then pipeline without tasks",
+			urls: []string{
+				"registry.com/one:1.0@" + sampleHashOne.String(),
+				"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(),
+			},
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/empty-pipeline:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
+		},
+		{
+			name: "required tasks removed",
+			urls: []string{
+				"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(),
+			},
+			input: hd.Doc(`
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/empty-pipeline:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks: []
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+				`),
+		},
+		{
+			name: "prefer older entries with same digest",
+			urls: []string{
+				"registry.com/one:1.0@" + sampleHashOne.String(),
+			},
+			input: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "0.9"
+			`),
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/one:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "0.9"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+			`),
+		},
+		{
+			name: "prune older entries",
+			urls: []string{
+				"registry.com/mixed:1.0@" + sampleHashOne.String(),
+			},
+			prune: true,
+			input: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashThree.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.3"
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.2"
+				task-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashThree.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.3"
+				    - digest: ` + sampleHashTwo.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.2"
+			`),
+			output: hd.Doc(`
+				---
+				pipeline-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				    - digest: ` + sampleHashThree.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.3"
+				required-tasks:
+				  - effective_on: "` + expectedEffectiveOn + `"
+				    tasks:
+				      - buildah
+				      - git-clone
+				      - summary
+				task-bundles:
+				  registry.com/mixed:
+				    - digest: ` + sampleHashOne.String() + `
+				      effective_on: "` + expectedEffectiveOn + `"
+				      tag: "1.0"
+				    - digest: ` + sampleHashThree.String() + `
+				      effective_on: "` + yesterday + `"
+				      tag: "0.3"
+			`),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			fs := afero.NewMemMapFs()
 			inputFile := ""
 			if tt.input != "" {
-				inputFile = path.Join(t.TempDir(), "input.yaml")
-				f, err := os.Create(inputFile)
+				err := afero.WriteFile(fs, "input.yaml", []byte(tt.input), 0444)
 				assert.NoError(t, err)
-				defer f.Close()
-				_, err = f.WriteString(tt.input)
-				assert.NoError(t, err)
+				inputFile = "input.yaml"
 			}
-			output, err := Track(context.TODO(), tt.urls, inputFile, func(ctx context.Context, ref image.ImageReference) ([]string, error) {
-				return []string{"pipeline"}, nil
-			})
+
+			client := fakeClient{objects: testObjects, images: testImages}
+			ctx = WithClient(ctx, client)
+
+			output, err := Track(ctx, fs, tt.urls, inputFile, tt.prune)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.output, string(output))
 		})
@@ -177,97 +434,203 @@ task-bundles:
 
 }
 
-func TestTrackerAddKeepsOrder(t *testing.T) {
-	parameters := gopter.DefaultTestParameters()
+type fakeClient struct {
+	objects map[string]map[string]map[string]runtime.Object
+	images  map[string]v1.Image
+}
 
-	// uncomment when test fails and set the seed to the printed value
-	// parameters.Rng.Seed(1234) -
-	arbitraries := arbitrary.DefaultArbitraries()
-
-	nonEmptyIdentifier := gen.Identifier().SuchThat(func(v string) bool {
-		return len(v) > 0
-	})
-	arbitraries.RegisterGen(gen.SliceOf(
-		gen.Struct(reflect.TypeOf(Record{}), map[string]gopter.Gen{
-			"Digest":     gen.RegexMatch("^sha256:[a-f0-9]{64}$"),
-			"Collection": nonEmptyIdentifier,
-			"Tag":        gen.Identifier(),
-			"Repository": nonEmptyIdentifier,
-		})))
-
-	properties := gopter.NewProperties(parameters)
-
-	properties.Property("collections are sorted", arbitraries.ForAll(
-		func(records []Record) bool {
-			tracker := Tracker{}
-			for _, r := range records {
-				tracker.add(r)
+func (r fakeClient) GetTektonObject(ctx context.Context, bundle, kind, name string) (runtime.Object, error) {
+	if bundle, ok := r.objects[bundle]; ok {
+		if names, ok := bundle[kind]; ok {
+			if obj, ok := names[name]; ok {
+				return obj, nil
 			}
+		}
+	}
+	return nil, fmt.Errorf("resource named %q of kind %q not found", name, kind)
+}
 
-			raw, err := tracker.Output()
-			if err != nil {
-				panic(err)
-			}
+func (r fakeClient) GetImage(ctx context.Context, ref name.Reference) (v1.Image, error) {
+	if image, ok := r.images[ref.String()]; ok {
+		return image, nil
+	}
+	return nil, fmt.Errorf("image %q not found", ref)
+}
 
-			buff := bytes.NewBuffer(raw)
-			scanner := bufio.NewScanner(buff)
-			scanner.Split(bufio.ScanLines)
-
-			// at this level of identation, last string was
-			lastAt := map[int]string{}
-			lastLevel := 0
-			for scanner.Scan() {
-				line := scanner.Text()
-
-				// ignore blank lines or document separator lines
-				if line == "" || line == "---" {
-					continue
-				}
-
-				// remove quotes, they're just messing with comparission below,
-				// i.e. `"y"`` -> "y"
-				line = strings.ReplaceAll(line, `"`, "")
-				// remove trailing colon, it also messes with comparisson below,
-				// i.e. "abc:" -> "abc"
-				line = strings.TrimSuffix(line, ":")
-
-				// counts the identation, i.e. number of spaces on the left
-				level := len(line) - len(strings.TrimLeft(line, " "))
-
-				// we're going to a lower level of identation, meaning we're now
-				// processing a key that is not at the same, but at a lower
-				// level, also meaning that the lines processed below this level
-				// were were compared, i.e. we don't want to compare x and y
-				// here:
-				// a:
-				//   x: 1
-				//   z: 3
-				// b:
-				//   y: 2
-				//   w: 4
-				// only a and b, x and z and y and w
-				if lastLevel > level {
-					for i := level + 1; i <= lastLevel; i++ {
-						delete(lastAt, i) // forget about unrelated lines
-					}
-				}
-
-				if last, ok := lastAt[level]; ok && strings.Compare(last, line) > 0 {
-					// we have found an unsorted line
-					return false
-				}
-
-				// remember this line at its level for comparing to other lines
-				// on this level
-				lastAt[level] = line
-				// remember the level so we can reset above
-				lastLevel = level
-			}
-
-			// all lines are sorted
-			return true
+var testObjects = map[string]map[string]map[string]runtime.Object{
+	"registry.com/one:1.0@" + sampleHashOne.String(): {
+		"pipeline": {
+			"pipeline-v1": mustCreateFakePipelineObject(),
 		},
-	))
+	},
+	"registry.com/two:2.0@" + sampleHashTwo.String(): {
+		"pipeline": {
+			"pipeline-v2": mustCreateFakePipelineObject(),
+		},
+	},
+	"registry.com/repo:one@" + sampleHashOne.String(): {
+		"pipeline": {
+			"pipeline-v1": mustCreateFakePipelineObject(),
+		},
+	},
+	"registry.com/repo:two@" + sampleHashTwo.String(): {
+		"pipeline": {
+			"pipeline-v2": mustCreateFakePipelineObject(),
+		},
+	},
+	"registry.com/mixed:1.0@" + sampleHashOne.String(): {
+		"pipeline": {
+			"pipeline-v1": mustCreateFakePipelineObject(),
+		},
+	},
+	"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(): {
+		"pipeline": {
+			"pipeline-v1": mustCreateFakeEmptyPipelineObject(),
+		},
+	},
+}
 
-	properties.TestingRun(t)
+var testImages = map[string]v1.Image{
+	"registry.com/one:1.0@" + sampleHashOne.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v1", kind: "pipeline"},
+		// {name: "task-v1", kind: "task"},
+	}),
+	"registry.com/two:2.0@" + sampleHashTwo.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v2", kind: "pipeline"},
+	}),
+	"registry.com/repo:one@" + sampleHashOne.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v1", kind: "pipeline"},
+		// {name: "task-v1", kind: "task"},
+	}),
+	"registry.com/repo:two@" + sampleHashTwo.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v2", kind: "pipeline"},
+	}),
+	"registry.com/mixed:1.0@" + sampleHashOne.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v1", kind: "pipeline"},
+		{name: "task-v1", kind: "task"},
+	}),
+	"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(): mustCreateFakeBundleImage([]fakeDefinition{
+		{name: "pipeline-v1", kind: "pipeline"},
+	}),
+}
+
+type fakeDefinition struct {
+	name string
+	kind string
+}
+
+func mustCreateFakeBundleImage(defs []fakeDefinition) v1.Image {
+	adds := make([]mutate.Addendum, 0, len(defs))
+
+	for _, definition := range defs {
+		l, err := random.Layer(0, types.DockerLayer)
+		if err != nil {
+			panic("unable to create layer for test data")
+		}
+		adds = append(adds, mutate.Addendum{
+			Layer: l,
+			Annotations: map[string]string{
+				oci.KindAnnotation:  definition.kind,
+				oci.TitleAnnotation: definition.name,
+			},
+		})
+	}
+
+	img, err := mutate.Append(empty.Image, adds...)
+	if err != nil {
+		panic(err)
+	}
+	return img
+}
+
+func mustCreateFakePipelineObject() runtime.Object {
+	gitCloneTask := v1beta1.PipelineTask{
+		TaskRef: &v1beta1.TaskRef{
+			Name: "git-clone",
+		},
+	}
+	buildahTask := v1beta1.PipelineTask{
+		TaskRef: &v1beta1.TaskRef{
+			ResolverRef: v1beta1.ResolverRef{
+				Resolver: "bundle",
+				Params: []v1beta1.Param{
+					{
+						Name: "name",
+						Value: v1beta1.ParamValue{
+							StringVal: "buildah",
+						},
+					},
+				},
+			},
+		},
+	}
+	summaryTask := v1beta1.PipelineTask{
+		TaskRef: &v1beta1.TaskRef{
+			Name: "summary",
+		},
+	}
+	pipeline := v1beta1.Pipeline{}
+	pipeline.SetDefaults(context.Background())
+	pipeline.Spec.Tasks = []v1beta1.PipelineTask{gitCloneTask, buildahTask}
+	pipeline.Spec.Finally = []v1beta1.PipelineTask{summaryTask}
+
+	return &pipeline
+}
+
+func mustCreateFakeEmptyPipelineObject() runtime.Object {
+	pipeline := v1beta1.Pipeline{}
+	pipeline.SetDefaults(context.Background())
+	return &pipeline
+}
+
+func TestFilterRequiredTasks(t *testing.T) {
+	date := time.Now().UTC().Add(time.Second * -1)
+	future := date.Add(time.Hour * 24 * 30)
+
+	requiredTasks := []commonTasksRecord{
+		{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
+		{EffectiveOn: date, Tasks: []string{"git-clone"}},
+	}
+
+	for _, c := range []struct {
+		name     string
+		expected Tracker
+		prune    bool
+	}{
+		{
+			name: "without prune",
+			expected: Tracker{
+				RequiredTasks: []commonTasksRecord{
+					{EffectiveOn: future, Tasks: []string{"git-clone", "buildah", "clair-scan"}},
+					{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
+					{EffectiveOn: date, Tasks: []string{"git-clone"}},
+				},
+			},
+			prune: false,
+		},
+		{
+			name: "with prune",
+			expected: Tracker{
+				RequiredTasks: []commonTasksRecord{
+					{EffectiveOn: future, Tasks: []string{"git-clone", "buildah", "clair-scan"}},
+					{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
+				},
+			},
+			prune: true,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			existing := Tracker{
+				RequiredTasks: requiredTasks,
+			}
+
+			existing.addRequiredTasksRecord(commonTasksRecord{
+				EffectiveOn: future,
+				Tasks:       []string{"git-clone", "buildah", "clair-scan"},
+			})
+
+			existing.filterRequiredTasks(c.prune)
+			assert.Equal(t, c.expected, existing)
+		})
+	}
 }

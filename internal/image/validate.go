@@ -20,19 +20,22 @@ import (
 	"context"
 	"fmt"
 
-	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
 	conftestOutput "github.com/open-policy-agent/conftest/output"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
 
 	"github.com/hacbs-contract/ec-cli/internal/evaluation_target/application_snapshot_image"
 	"github.com/hacbs-contract/ec-cli/internal/output"
+	"github.com/hacbs-contract/ec-cli/internal/policy"
 )
 
-// ValidateImage executes the required method calls to evaluate a given policy against a given imageRef
-func ValidateImage(ctx context.Context, imageRef string, policy *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
-	log.Debugf("Validating image %s", imageRef)
-	out := &output.Output{}
-	a, err := application_snapshot_image.NewApplicationSnapshotImage(ctx, imageRef, policy)
+// ValidateImage executes the required method calls to evaluate a given policy
+// against a given image url.
+func ValidateImage(ctx context.Context, fs afero.Fs, url string, p *policy.Policy) (*output.Output, error) {
+	log.Debugf("Validating image %s", url)
+
+	out := &output.Output{ImageURL: url}
+	a, err := application_snapshot_image.NewApplicationSnapshotImage(ctx, fs, url, p)
 	if err != nil {
 		log.Debug("Failed to create application snapshot image!")
 		return nil, err
@@ -48,7 +51,23 @@ func ValidateImage(ctx context.Context, imageRef string, policy *ecc.EnterpriseC
 	} else {
 		log.Debug("Image access check passed")
 		out.SetImageAccessibleCheck(true, "success")
+
+		// Ensure image URL contains a digest to avoid ambiguity in the next
+		// validation steps
+		ref, err := ParseAndResolve(url)
+		if err != nil {
+			log.Debugf("Failed to parse image url %s", url)
+			return nil, err
+		}
+		resolved := ref.String()
+		log.Debugf("Resolved image to %s", resolved)
+		if err := a.SetImageURL(resolved); err != nil {
+			log.Debugf("Failed to set resolved image url %s", resolved)
+			return nil, err
+		}
+		out.ImageURL = resolved
 	}
+
 	if err = a.ValidateImageSignature(ctx); err != nil {
 		log.Debug("Image signature check failed")
 		out.SetImageSignatureCheck(false, err.Error())
@@ -62,7 +81,18 @@ func ValidateImage(ctx context.Context, imageRef string, policy *ecc.EnterpriseC
 	} else {
 		log.Debug("Image attestation signature check passed")
 		out.SetAttestationSignatureCheck(true, "success")
+		out.Signatures = a.Signatures()
 	}
+	if err = a.ValidateAttestationSyntax(ctx); err != nil {
+		log.Debug("Image attestation syntax check failed")
+		out.SetAttestationSyntaxCheck(false, err.Error())
+	} else {
+		log.Debug("Image attestation syntax check passed")
+		out.SetAttestationSyntaxCheck(true, "success")
+	}
+
+	a.FilterMatchingAttestations(ctx)
+
 	attCount := len(a.Attestations())
 	log.Debugf("Found %d attestations", attCount)
 	if attCount == 0 {
@@ -79,21 +109,27 @@ func ValidateImage(ctx context.Context, imageRef string, policy *ecc.EnterpriseC
 		return out, nil
 	}
 
-	inputs, err := a.WriteInputFiles(ctx)
+	input, err := a.WriteInputFile(ctx, fs)
 	if err != nil {
 		log.Debug("Problem writing input files!")
 		return nil, err
 	}
 
-	results, err := a.Evaluator.Evaluate(ctx, inputs)
+	var allResults []conftestOutput.CheckResult
+	for _, e := range a.Evaluators {
+		// Todo maybe: Handle each one concurrently
+		results, err := e.Evaluate(ctx, []string{input})
 
-	if err != nil {
-		log.Debug("Problem running conftest policy check!")
-		return nil, err
+		if err != nil {
+			log.Debug("Problem running conftest policy check!")
+			return nil, err
+		} else {
+			allResults = append(allResults, results...)
+		}
 	}
 
 	log.Debug("Conftest policy check complete")
-	out.SetPolicyCheck(results)
+	out.SetPolicyCheck(allResults)
 
 	return out, nil
 }

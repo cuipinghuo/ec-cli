@@ -14,95 +14,231 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package kubernetes is a stub implementation of the Kubernetes apiserver
 package kubernetes
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"os"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/cucumber/godog"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/clientcmd/api"
+	clr "github.com/doiit/picocolors"
 
-	"github.com/hacbs-contract/ec-cli/internal/acceptance/git"
-	"github.com/hacbs-contract/ec-cli/internal/acceptance/wiremock"
+	"github.com/hacbs-contract/ec-cli/internal/acceptance/kubernetes/kind"
+	"github.com/hacbs-contract/ec-cli/internal/acceptance/kubernetes/stub"
+	"github.com/hacbs-contract/ec-cli/internal/acceptance/kubernetes/types"
+	"github.com/hacbs-contract/ec-cli/internal/acceptance/testenv"
 )
 
-// stubApiserverRunning starts the stub apiserver using WireMock
-func stubApiserverRunning(ctx context.Context) (context.Context, error) {
-	return wiremock.StartWiremock(ctx)
+type key int
+
+const clusterStateKey = key(0) // we store the ClusterState struct under this key in Context and when persisted
+
+// ClusterState holds the Cluster used in the current Context
+type ClusterState struct {
+	cluster types.Cluster
 }
 
-// stubPolicy stubs a response from the apiserver to fetch a EnterpriseContractPolicy
-// custom resource from the `acceptance` namespace with the given name and specification
-// the specification part can be templated using ${...} notation and supports `GITHOST`
-// variable substitution
-// TODO: namespace support
-func stubPolicy(ctx context.Context, name string, specification *godog.DocString) error {
-	ns := "acceptance"
-	return wiremock.StubFor(ctx, wiremock.Get(wiremock.URLPathEqualTo(fmt.Sprintf("/apis/appstudio.redhat.com/v1alpha1/namespaces/%s/enterprisecontractpolicies/%s", ns, name))).
-		WillReturn(fmt.Sprintf(`{
-				"apiVersion": "appstudio.redhat.com/v1alpha1",
-				"kind": "EnterpriseContractPolicy",
-				"metadata": {
-				  "name": "%s",
-				  "namespace": "%s"
-				},
-				"spec": %s
-			  }`, name, ns, os.Expand(specification.Content, func(key string) string {
-			if key == "GITHOST" {
-				return git.Host(ctx)
-			}
-
-			return ""
-		})),
-			map[string]string{"Content-Type": "application/json"},
-			200,
-		))
+func (c ClusterState) Key() any {
+	return clusterStateKey
 }
 
-// KubeConfig returns a valid kubeconfig configuration file in YAML format that
-// points to the stubbed apiserver and uses no authentication
-func KubeConfig(ctx context.Context) (string, error) {
-	server, err := wiremock.Endpoint(ctx)
-	if err != nil {
+func (c ClusterState) Up(ctx context.Context) bool {
+	// if the cluster implementation has been initialized and it claims the
+	// cluster to be up
+	return c.cluster != nil && c.cluster.Up(ctx)
+}
+
+func (c ClusterState) KubeConfig(ctx context.Context) (string, error) {
+	if err := mustBeUp(ctx, c); err != nil {
 		return "", err
 	}
 
-	cluster := "my-cluster"
+	return c.cluster.KubeConfig(ctx)
+}
 
-	context := "my-context"
+type startFunc func(context.Context) (context.Context, types.Cluster, error)
 
-	kubeconfig := api.Config{
-		CurrentContext: context,
-		Clusters: map[string]*api.Cluster{
-			cluster: {
-				Server: server,
-			},
-		},
-		Contexts: map[string]*api.Context{
-			context: {
-				Cluster: cluster,
-			},
-		},
+// startAndSetupState starts the cluster via the provided startFunc. The
+// crosscutting concern of setting up the ClusterState in the Context and making
+// sure we don't start the cluster multiple times per Context is handled here
+func startAndSetupState(start startFunc) func(context.Context) (context.Context, error) {
+	return func(ctx context.Context) (context.Context, error) {
+		var c = &ClusterState{}
+		ctx, err := testenv.SetupState(ctx, &c)
+		if err != nil {
+			return ctx, err
+		}
+
+		if c.Up(ctx) {
+			return ctx, nil
+		}
+
+		ctx, c.cluster, err = start(ctx)
+
+		return ctx, err
+	}
+}
+
+// mustBeUp makes sure that the cluster is up, used by functions that require
+// the cluster to be up
+func mustBeUp(ctx context.Context, c ClusterState) error {
+	if !c.Up(ctx) {
+		return errors.New("cluster has not been started, use `Given a <stub?> cluster running")
 	}
 
-	b, err := clientcmd.Write(kubeconfig)
+	return nil
+}
+
+func createNamespace(ctx context.Context) (context.Context, error) {
+	c := testenv.FetchState[ClusterState](ctx)
+
+	if err := mustBeUp(ctx, *c); err != nil {
+		return ctx, err
+	}
+
+	return c.cluster.CreateNamespace(ctx)
+}
+
+func createNamedPolicy(ctx context.Context, name string, specification *godog.DocString) error {
+	c := testenv.FetchState[ClusterState](ctx)
+
+	if err := mustBeUp(ctx, *c); err != nil {
+		return err
+	}
+
+	return c.cluster.CreateNamedPolicy(ctx, name, specification.Content)
+}
+
+func createPolicy(ctx context.Context, specification *godog.DocString) error {
+	c := testenv.FetchState[ClusterState](ctx)
+
+	if err := mustBeUp(ctx, *c); err != nil {
+		return err
+	}
+
+	return c.cluster.CreatePolicy(ctx, specification.Content)
+}
+
+func runTask(ctx context.Context, version string, params *godog.Table) error {
+	c := testenv.FetchState[ClusterState](ctx)
+
+	if err := mustBeUp(ctx, *c); err != nil {
+		return err
+	}
+
+	taskParams := map[string]string{}
+	for _, row := range params.Rows {
+		taskParams[row.Cells[0].Value] = row.Cells[1].Value
+	}
+
+	return c.cluster.RunTask(ctx, version, taskParams)
+}
+
+func theTaskShouldSucceed(ctx context.Context) error {
+	c := testenv.FetchState[ClusterState](ctx)
+
+	if err := mustBeUp(ctx, *c); err != nil {
+		return err
+	}
+
+	successful, err := c.cluster.AwaitUntilTaskIsDone(ctx)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	return string(b), nil
+	if !successful {
+		if err := logTaskOutput(ctx, *c); err != nil {
+			return err
+		}
+
+		return errors.New("the TaskRun did not succeed")
+	}
+
+	return nil
 }
 
-func IsRunning(ctx context.Context) bool {
-	return wiremock.IsRunning(ctx)
+func logTaskOutput(ctx context.Context, c ClusterState) error {
+	info, err := c.cluster.TaskInfo(ctx)
+	if err != nil {
+		return err
+	}
+
+	noColors := testenv.NoColorOutput(ctx)
+	if clr.SUPPORT_COLOR != !noColors {
+		clr.SUPPORT_COLOR = !noColors
+	}
+
+	output := &strings.Builder{}
+	outputSegment := func(name string, v any) {
+		output.WriteString("\n\n")
+		output.WriteString(clr.Underline(clr.Bold(name)))
+		output.WriteString(fmt.Sprintf("\n%v", v))
+	}
+
+	var buffy bytes.Buffer
+	w := tabwriter.NewWriter(&buffy, 10, 1, 2, ' ', 0)
+
+	fmt.Fprintf(w, "%s\t%s\n", clr.Bold("Namespace"), info.Namespace)
+	fmt.Fprintf(w, "%s\t%s\n", clr.Bold("Name"), info.Name)
+	fmt.Fprintf(w, "%s\t%s", clr.Bold("Status"), info.Status)
+	w.Flush()
+	outputSegment("TaskRun", buffy.String())
+
+	buffy.Reset()
+	fmt.Fprintf(w, "%s\t%s\n", clr.Bold("Name"), clr.Bold("Value"))
+	for n, v := range info.Params {
+		fmt.Fprintf(w, "%s\t%v\n", n, v)
+	}
+	w.Flush()
+	outputSegment("Parameters", buffy.String())
+
+	buffy.Reset()
+	for _, step := range info.Steps {
+		outputSegment(fmt.Sprintf("Step \"%s\"", clr.Bold(step.Name)), fmt.Sprintf("%s  %s\n----- Logs -----\n%s\n----- /Logs -----", clr.Bold("Status"), step.Status, step.Logs))
+	}
+	w.Flush()
+
+	// TODO, when the task fails and test state is persisted add some debugging
+	// lines here to help debug, e.g. `export
+	// KUBECONFIG=$TMPDIR/ec-acceptance.../kubeconfig`, set the current
+	// namespace with: `kubectl config set-context --current --namespace
+	// acceptance-...`
+
+	fmt.Println(output)
+	return nil
 }
 
-// AddStepsTo adds Gherkin steps to the godog ScenarioContext
+// AddStepsTo adds cluster-related steps to the context
 func AddStepsTo(sc *godog.ScenarioContext) {
-	sc.Step(`^stub apiserver running$`, stubApiserverRunning)
-	sc.Step(`^policy configuration named "([^"]*)" with specification$`, stubPolicy)
+	sc.Step(`^a stub cluster running$`, startAndSetupState(stub.Start))
+	sc.Step(`^a cluster running$`, startAndSetupState(kind.Start))
+	sc.Step(`^a working namespace$`, createNamespace)
+	sc.Step(`^policy configuration named "([^"]*)" with specification$`, createNamedPolicy)
+	sc.Step(`^a cluster policy with content:$`, createPolicy)
+	sc.Step(`^version ([\d.]+) of the task is run with parameters:$`, runTask)
+	sc.Step(`^the task should succeed$`, theTaskShouldSucceed)
+
+	// stops the cluster unless the environment is persisted, the cluster state
+	// is nonexistent or the cluster wasn't started
+	sc.After(func(ctx context.Context, sc *godog.Scenario, err error) (context.Context, error) {
+		if testenv.Persisted(ctx) {
+			return ctx, nil
+		}
+
+		if !testenv.HasState[ClusterState](ctx) {
+			return ctx, nil
+		}
+
+		c := testenv.FetchState[ClusterState](ctx)
+
+		if !c.cluster.Up(ctx) {
+			return ctx, nil
+		}
+
+		return ctx, c.cluster.Stop(ctx)
+	})
 }

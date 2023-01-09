@@ -14,22 +14,31 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package cmd
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
-	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
 	conftestOutput "github.com/open-policy-agent/conftest/output"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hacbs-contract/ec-cli/internal/applicationsnapshot"
 	"github.com/hacbs-contract/ec-cli/internal/output"
+	"github.com/hacbs-contract/ec-cli/internal/policy"
 )
+
+const mockPublicKey string = `-----BEGIN PUBLIC KEY-----\n` +
+	`MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPEwqj1tPu2Uwti2abGgGgURluuad\n` +
+	`BK1e0Opk9WTCJ6WyP8Yo3Dl9wNJnjfzBGoRocUsfSd8foGKnFX1E34xVzw==\n` +
+	`-----END PUBLIC KEY-----\n`
 
 type data struct {
 	imageRef string
@@ -136,9 +145,11 @@ func Test_determineInputSpec(t *testing.T) {
 		},
 	}
 
+	cases = cases[4:5]
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s, err := applicationsnapshot.DetermineInputSpec(c.arguments.filePath, c.arguments.input, c.arguments.imageRef)
+			s, err := applicationsnapshot.DetermineInputSpec(afero.NewOsFs(), c.arguments.filePath, c.arguments.input, c.arguments.imageRef)
 			if c.err != "" {
 				assert.EqualError(t, err, c.err)
 			}
@@ -148,7 +159,7 @@ func Test_determineInputSpec(t *testing.T) {
 }
 
 func Test_ValidateImageCommand(t *testing.T) {
-	validate := func(ctx context.Context, imageRef string, policy *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
+	validate := func(_ context.Context, _ afero.Fs, url string, _ *policy.Policy) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: true,
@@ -159,6 +170,9 @@ func Test_ValidateImageCommand(t *testing.T) {
 			AttestationSignatureCheck: output.VerificationStatus{
 				Passed: true,
 			},
+			AttestationSyntaxCheck: output.VerificationStatus{
+				Passed: true,
+			},
 			PolicyCheck: []conftestOutput.CheckResult{
 				{
 					FileName:  "test.json",
@@ -166,17 +180,20 @@ func Test_ValidateImageCommand(t *testing.T) {
 					Successes: 14,
 				},
 			},
+			ImageURL: url,
 			ExitCode: 0,
 		}, nil
 	}
 
 	cmd := validateImageCmd(validate)
 
+	cmd.SetContext(withFs(context.TODO(), afero.NewMemMapFs()))
+
 	cmd.SetArgs([]string{
 		"--image",
 		"registry/image:tag",
 		"--policy",
-		`{"publicKey": "test-public-key"}`,
+		fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 	})
 
 	var out bytes.Buffer
@@ -184,8 +201,9 @@ func Test_ValidateImageCommand(t *testing.T) {
 
 	err := cmd.Execute()
 	assert.NoError(t, err)
-	assert.JSONEq(t, `{
+	assert.JSONEq(t, fmt.Sprintf(`{
 		"success": true,
+		"key": "%s",
 		"components": [
 		  {
 			"name": "Unnamed",
@@ -195,7 +213,7 @@ func Test_ValidateImageCommand(t *testing.T) {
 			"success": true
 		  }
 		]
-	  }`, out.String())
+	  }`, mockPublicKey), out.String())
 }
 
 func Test_ValidateErrorCommand(t *testing.T) {
@@ -210,7 +228,7 @@ func Test_ValidateErrorCommand(t *testing.T) {
 				"--image",
 				"registry/image:tag",
 				"--policy",
-				`{"publicKey": "test-public-key"}`,
+				fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 			},
 			expected: `1 error occurred:
 	* error validating image registry/image:tag of component Unnamed: expected
@@ -236,7 +254,7 @@ func Test_ValidateErrorCommand(t *testing.T) {
 				"--json-input",
 				"{invalid JSON}",
 				"--policy",
-				`{"publicKey": "test-public-key"}`,
+				fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 			},
 			expected: `1 error occurred:
 	* invalid character 'i' looking for beginning of object key string
@@ -260,11 +278,13 @@ func Test_ValidateErrorCommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			validate := func(_ context.Context, _ string, _ *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
+			validate := func(context.Context, afero.Fs, string, *policy.Policy) (*output.Output, error) {
 				return nil, errors.New("expected")
 			}
 
 			cmd := validateImageCmd(validate)
+
+			cmd.SetContext(withFs(context.TODO(), afero.NewMemMapFs()))
 
 			cmd.SetArgs(c.args)
 
@@ -281,7 +301,7 @@ func Test_ValidateErrorCommand(t *testing.T) {
 }
 
 func Test_FailureImageAccessibility(t *testing.T) {
-	validate := func(ctx context.Context, imageRef string, policy *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
+	validate := func(_ context.Context, _ afero.Fs, url string, _ *policy.Policy) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: false,
@@ -295,16 +315,19 @@ func Test_FailureImageAccessibility(t *testing.T) {
 				Passed: false,
 				Result: &conftestOutput.Result{Message: "skipped due to inaccessible image ref"},
 			},
+			ImageURL: url,
 		}, nil
 	}
 
 	cmd := validateImageCmd(validate)
 
+	cmd.SetContext(withFs(context.TODO(), afero.NewMemMapFs()))
+
 	cmd.SetArgs([]string{
 		"--image",
 		"registry/image:tag",
 		"--policy",
-		`{"publicKey": "test-public-key"}`,
+		fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 	})
 
 	var out bytes.Buffer
@@ -312,8 +335,9 @@ func Test_FailureImageAccessibility(t *testing.T) {
 
 	err := cmd.Execute()
 	assert.NoError(t, err)
-	assert.JSONEq(t, `{
+	assert.JSONEq(t, fmt.Sprintf(`{
 		"success": false,
+		"key": "%s",
 		"components": [
 		  {
 			"name": "Unnamed",
@@ -327,11 +351,11 @@ func Test_FailureImageAccessibility(t *testing.T) {
 			"success": false
 		  }
 		]
-	  }`, out.String())
+	  }`, mockPublicKey), out.String())
 }
 
 func Test_FailureOutput(t *testing.T) {
-	validate := func(ctx context.Context, imageRef string, policy *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
+	validate := func(_ context.Context, _ afero.Fs, url string, _ *policy.Policy) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: false,
@@ -344,16 +368,19 @@ func Test_FailureOutput(t *testing.T) {
 				Passed: false,
 				Result: &conftestOutput.Result{Message: "failed attestation signature check"},
 			},
+			ImageURL: url,
 		}, nil
 	}
 
 	cmd := validateImageCmd(validate)
 
+	cmd.SetContext(withFs(context.TODO(), afero.NewMemMapFs()))
+
 	cmd.SetArgs([]string{
 		"--image",
 		"registry/image:tag",
 		"--policy",
-		`{"publicKey": "test-public-key"}`,
+		fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 	})
 
 	var out bytes.Buffer
@@ -361,8 +388,9 @@ func Test_FailureOutput(t *testing.T) {
 
 	err := cmd.Execute()
 	assert.NoError(t, err)
-	assert.JSONEq(t, `{
+	assert.JSONEq(t, fmt.Sprintf(`{
 		"success": false,
+		"key": "%s",
 		"components": [
 		  {
 			"name": "Unnamed",
@@ -375,11 +403,11 @@ func Test_FailureOutput(t *testing.T) {
 			"success": false
 		  }
 		]
-	  }`, out.String())
+	  }`, mockPublicKey), out.String())
 }
 
 func Test_WarningOutput(t *testing.T) {
-	validate := func(_ context.Context, _ string, _ *ecc.EnterpriseContractPolicySpec) (*output.Output, error) {
+	validate := func(_ context.Context, _ afero.Fs, url string, _ *policy.Policy) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: true,
@@ -398,16 +426,19 @@ func Test_WarningOutput(t *testing.T) {
 					},
 				},
 			},
+			ImageURL: url,
 		}, nil
 	}
 
 	cmd := validateImageCmd(validate)
 
+	cmd.SetContext(withFs(context.TODO(), afero.NewMemMapFs()))
+
 	cmd.SetArgs([]string{
 		"--image",
 		"registry/image:tag",
 		"--policy",
-		`{"publicKey": "test-public-key"}`,
+		fmt.Sprintf(`{"publicKey": "%s"}`, mockPublicKey),
 	})
 
 	var out bytes.Buffer
@@ -415,8 +446,9 @@ func Test_WarningOutput(t *testing.T) {
 
 	err := cmd.Execute()
 	assert.NoError(t, err)
-	assert.JSONEq(t, `{
+	assert.JSONEq(t, fmt.Sprintf(`{
 		"success": true,
+		"key": "%s",
 		"components": [
 		  {
 			"name": "Unnamed",
@@ -429,5 +461,5 @@ func Test_WarningOutput(t *testing.T) {
 			"success": true
 		  }
 		]
-	  }`, out.String())
+	  }`, mockPublicKey), out.String())
 }

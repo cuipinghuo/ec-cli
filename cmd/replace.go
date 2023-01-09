@@ -18,12 +18,18 @@ package cmd
 
 import (
 	"context"
-	"fmt"
-	"os"
 
+	hd "github.com/MakeNowJust/heredoc"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 
 	"github.com/hacbs-contract/ec-cli/internal/replacer"
+)
+
+const (
+	defaultCatalogName    = "tekton"
+	defaultRepositoryBase = "gcr.io/tekton-releases/catalog/upstream/"
+	defaultHubAPIURL      = "https://api.hub.tekton.dev"
 )
 
 type replaceFn func(context.Context, []string, string, bool, *replacer.CatalogOptions) ([]byte, error)
@@ -37,59 +43,66 @@ func replaceCmd(replace replaceFn) *cobra.Command {
 		catalogRepoBase  string
 		catalogHubAPIURL string
 	}{
-		catalogName:      "tekton",
-		catalogRepoBase:  "gcr.io/tekton-releases/catalog/upstream/",
-		catalogHubAPIURL: "https://api.hub.tekton.dev",
+		catalogName:      defaultCatalogName,
+		catalogRepoBase:  defaultRepositoryBase,
+		catalogHubAPIURL: defaultHubAPIURL,
 	}
 
 	cmd := &cobra.Command{
 		Use:   "replace",
 		Short: "Replace image references in a given source",
-		Long: `Replace image references in a given source
 
-Given a source, process its contents to identify Tekton bundle
-image references and replace them with an updated version.
+		Long: hd.Doc(`
+			Replace image references in a given source
 
-For any image reference matching the catalog-repo-base, Tekton
-Hub is consulted to determine the latest version of the task,
-and its latest image reference. The original image reference is
-then replaced with its latest version.
+			Given a source, process its contents to identify Tekton bundle
+			image references and replace them with an updated version.
 
-If one or more image parameters are provided, they will also be
-used to replace image references matching the same OCI repository.
-For example, the image reference "example.com/repo:1.2" would
-replace the image reference "example.com/repo:1.1". The provided
-image reference can inlude a tag, a digest, or both. If a digest
-is not provided, this command will query the repository for this
-value.
+			For any image reference matching the catalog-repo-base, Tekton
+			Hub is consulted to determine the latest version of the task,
+			and its latest image reference. The original image reference is
+			then replaced with its latest version.
 
-The following source types are supported:
+			If one or more image parameters are provided, they will also be
+			used to replace image references matching the same OCI repository.
+			For example, the image reference "example.com/repo:1.2" would
+			replace the image reference "example.com/repo:1.1". The provided
+			image reference can inlude a tag, a digest, or both. If a digest
+			is not provided, this command will query the repository for this
+			value.
 
-file: simply a file accessible by the local file system. It
-  can be optionally prefixed with the string file://
+			The following source types are supported:
 
-git repo: a reference to a git repository. By default, the
-  branch named main is used. Add the suffix #<branch> to
-  specify a different branch. This source type is defined by
-  any one of the prefixes https:// http:// git://`,
-		Example: `Display a modified version of the source file where
-all occurences of bundle references from the main Tekton
-catalog are replaced with the corresponding latest version:
+			file: simply a file accessible by the local file system. It
+			  can be optionally prefixed with the string file://
 
-  ec replace --source resource.yaml
+			git repo: a reference to a git repository. By default, the
+			  branch named main is used. Add the suffix #<branch> to
+			  specify a different branch. This source type is defined by
+			  any one of the prefixes https:// http:// git://
+		`),
 
-Process all the yaml files in the main branch of a git repository:
+		Example: hd.Doc(`
+			Display a modified version of the source file where
+			all occurences of bundle references from the main Tekton
+			catalog are replaced with the corresponding latest version:
 
-  ec replace --source https://git.example.com/org/repo
+			  ec replace --source resource.yaml
 
-Specify an alternative branch:
+			Process all the yaml files in the main branch of a git repository:
 
-  ec replace --source https://git.example.com/org/repo#my-branch
+			  ec replace --source https://git.example.com/org/repo
 
-In addition to the Tekton catalog, also replace occurences of
-the provided images:
+			Specify an alternative branch:
 
-  ec replace --source resource.yaml <IMAGE> <IMAGE>`,
+			  ec replace --source https://git.example.com/org/repo#my-branch
+
+			In addition to the Tekton catalog, also replace occurences of
+			the provided images:
+
+			  ec replace --source resource.yaml <IMAGE> <IMAGE>
+		`),
+
 		RunE: func(cmd *cobra.Command, images []string) (err error) {
 			catalogOptions := &replacer.CatalogOptions{
 				CatalogName: data.catalogName,
@@ -103,20 +116,12 @@ the provided images:
 			}
 
 			if data.outputFile == "" {
-				fmt.Println(string(out))
+				_, err = cmd.OutOrStdout().Write(out)
 			} else {
-				f, err := os.Create(data.outputFile)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				_, err = f.Write(out)
-				if err != nil {
-					return err
-				}
+				err = afero.WriteFile(fs(cmd.Context()), data.outputFile, out, 0666)
 			}
 
-			return nil
+			return
 		},
 	}
 
@@ -132,9 +137,10 @@ the provided images:
 	cmd.Flags().StringVar(&data.catalogName, "catalog-name", data.catalogName,
 		"name of the catalog in the Tekton Hub")
 
-	cmd.Flags().StringVar(&data.catalogRepoBase, "catalog-repo-base", data.catalogRepoBase,
-		"base of the OCI repository where images from the Tekton Hub are found. "+
-			"The full image reference is created as <catalog-repo-base><name>:<version>")
+	cmd.Flags().StringVar(&data.catalogRepoBase, "catalog-repo-base", data.catalogRepoBase, hd.Doc(`
+		base of the OCI repository where images from the Tekton Hub are found.
+		The full image reference is created as <catalog-repo-base><name>:<version>
+	`))
 
 	cmd.Flags().StringVar(&data.catalogHubAPIURL, "catalog-hub-api", data.catalogHubAPIURL,
 		"URL for the Tekton Hub API")

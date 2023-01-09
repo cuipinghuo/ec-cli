@@ -14,18 +14,23 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package replacer
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hacbs-contract/ec-cli/internal/image"
 )
+
+const testHash = "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
 
 func TestBasicImageReplacer(t *testing.T) {
 	cases := []struct {
@@ -60,7 +65,7 @@ func TestBasicImageReplacer(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ref, err := image.NewImageReference(c.url)
+			ref, err := image.NewImageReference(c.url, name.StrictValidation)
 			assert.NoError(t, err)
 			replacer, err := newBasicImageReplacer(*ref)
 			assert.NoError(t, err)
@@ -84,7 +89,7 @@ func TestCatalogImageReplacer(t *testing.T) {
 			latestVersion: "4.0",
 			inputLine:     "taskRef: registry.com/bundles/my-task:3.0",
 			expectedMatch: true,
-			expectedLine:  "taskRef: registry.com/bundles/my-task:4.0@" + testDigest,
+			expectedLine:  "taskRef: registry.com/bundles/my-task:4.0@" + testHash,
 		},
 		{
 			name:          "no replacement when not matched",
@@ -105,16 +110,16 @@ func TestCatalogImageReplacer(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			hubHttpGet = func(url string) (*http.Response, error) {
 				content := `{"data": {"latestVersion": {"version": "` + c.latestVersion + `"}}}`
-				body := ioutil.NopCloser(bytes.NewReader([]byte(content)))
+				body := io.NopCloser(bytes.NewReader([]byte(content)))
 				return &http.Response{
 					StatusCode: 200,
 					Body:       body,
 				}, nil
 			}
-			imageParseAndResolve = func(url string) (*image.ImageReference, error) {
+			imageParseAndResolve = func(url string, _ ...name.Option) (*image.ImageReference, error) {
 				// Adding a digest makes it so the real image.ParseAndResolve doesn't make
 				// a network connection.
-				return image.ParseAndResolve(url + "@" + testDigest)
+				return image.ParseAndResolve(url + "@" + testHash)
 			}
 
 			replacer, err := newCatalogImageReplacer(&CatalogOptions{

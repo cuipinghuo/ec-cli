@@ -18,9 +18,13 @@ package cmd
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 
+	hd "github.com/MakeNowJust/heredoc"
+	"github.com/hashicorp/go-multierror"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
 	"github.com/hacbs-contract/ec-cli/internal/applicationsnapshot"
@@ -41,35 +45,42 @@ func commitAuthorizationCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "commit",
 		Short: "Fetch authorizations from a git repository",
-		Long: `Fetch authorizations from a git repository
 
-An authorization, within the context of this command, is loosely
-defined as the person who appears in the "Signed-off-by:" line
-in the git commit message.
+		Long: hd.Doc(`
+			Fetch authorizations from a git repository
 
-This command also verifies the provided images have been attested
-with the provided public key.
+			An authorization, within the context of this command, is loosely
+			defined as the person who appears in the "Signed-off-by:" line
+			in the git commit message.
 
-The git commit and git repository are extracted from the field
-".predicate.materials" of the image attestation.`,
-		Example: `Process git commit from a single image:
+			This command also verifies the provided images have been attested
+			with the provided public key.
 
-  ec fetch commit --image-ref <image url> --public-key <path/to/public/key>
+			The git commit and git repository are extracted from the field
+			".predicate.materials" of the image attestation.
+		`),
 
-Process git commit from an ApplicationSnapshot Spec file:
+		Example: hd.Doc(`
+			Process git commit from a single image:
 
-  ec fetch commit --file-path <path/to/ApplicationSnapshot/file> --public-key <path/to/public/key>
+			  ec fetch commit --image-ref <image url> --public-key <path/to/public/key>
 
-Process git commit from an inline ApplicationSnapshot Spec:
+			Process git commit from an ApplicationSnapshot Spec file:
 
-  ec fetch commit --json-input '{"components":[{"containerImage":"<image url>"}]}' --public-key <path/to/public/key>
+			  ec fetch commit --file-path <path/to/ApplicationSnapshot/file> --public-key <path/to/public/key>
 
-Use public key from a kubernetes secret:
+			Process git commit from an inline ApplicationSnapshot Spec:
 
-  ec fetch commit --image-ref <image url> --public-key k8s://<namespace>/<secret-name>`,
+			  ec fetch commit --json-input '{"components":[{"containerImage":"<image url>"}]}' --public-key <path/to/public/key>
+
+			Use public key from a kubernetes secret:
+
+			  ec fetch commit --image-ref <image url> --public-key k8s://<namespace>/<secret-name>
+		`),
 
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			spec, err := applicationsnapshot.DetermineInputSpec(data.filePath, data.input, data.imageRef)
+			ctx := cmd.Context()
+			spec, err := applicationsnapshot.DetermineInputSpec(fs(ctx), data.filePath, data.input, data.imageRef)
 			if err != nil {
 				return err
 			}
@@ -78,15 +89,17 @@ Use public key from a kubernetes secret:
 
 			return nil
 		},
+
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var errs error
 			for _, comp := range data.spec.Components {
 				err := validateGitSource(cmd.Context(), comp.ContainerImage, data.publicKey)
 				if err != nil {
-					log.Println(err)
+					errs = multierror.Append(errs, fmt.Errorf("component: %+v - %w", comp, err))
 					continue
 				}
 			}
-			return nil
+			return errs
 		},
 	}
 
@@ -109,11 +122,14 @@ func validateGitSource(ctx context.Context, imageRef, publicKey string) error {
 		return err
 	}
 
+	var gitSourceFound bool
 	for _, att := range validatedImage.Attestations {
 		gitSource, err := att.NewGitSource()
 		if err != nil {
-			return err
+			log.Debug("attestation has empty 'predicate.material' entry")
+			continue
 		}
+		gitSourceFound = true
 
 		authorization, err := image.GetAuthorization(ctx, gitSource)
 		if err != nil {
@@ -124,6 +140,9 @@ func validateGitSource(ctx context.Context, imageRef, publicKey string) error {
 		if err != nil {
 			continue
 		}
+	}
+	if !gitSourceFound {
+		return errors.New("all attestations for component failed to provide valid '.Predicate.Material' entry")
 	}
 	return nil
 }

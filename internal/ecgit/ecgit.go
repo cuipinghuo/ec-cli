@@ -208,8 +208,8 @@ func parseRepoURL(repoURL string) (repoOwner string, repoName string, repoHTTP s
 
 // createAutomatedPR executes the workflow to clone, create the specified branch, apply a diff file, commit the changes
 // push the changes to the repo remote and create a PR for the changes.
-func createAutomatedPR(ctx context.Context, componentRepoURL string, diffFilePath string, destinationBranch string, prBranchName string, prTitle string, prBody string) error {
-	ok, err := afero.Exists(utils.AppFS, diffFilePath)
+func createAutomatedPR(ctx context.Context, fs afero.Fs, componentRepoURL string, diffFilePath string, destinationBranch string, prBranchName string, prTitle string, prBody string) error {
+	ok, err := afero.Exists(fs, diffFilePath)
 	if err != nil {
 		log.Debug("Unable to check if diff file exists")
 		return err
@@ -217,13 +217,13 @@ func createAutomatedPR(ctx context.Context, componentRepoURL string, diffFilePat
 		log.Debug("Diff file does not exist")
 		return fmt.Errorf("diff file '%s' does not exist", diffFilePath)
 	}
-	destDir, err := utils.CreateWorkDir()
+	destDir, err := utils.CreateWorkDir(fs)
 	if err != nil {
 		log.Errorf("Error creating working directory: %s\n", err)
 		return err
 	}
 	defer func() {
-		err = utils.AppFS.RemoveAll(destDir)
+		err = fs.RemoveAll(destDir)
 		if err != nil {
 			log.Fatal(err)
 		}

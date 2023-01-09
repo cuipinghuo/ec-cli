@@ -21,8 +21,10 @@ import (
 	"os"
 	"time"
 
+	hd "github.com/MakeNowJust/heredoc"
 	"github.com/spf13/cobra"
 
+	"github.com/hacbs-contract/ec-cli/internal/kubernetes"
 	"github.com/hacbs-contract/ec-cli/internal/logging"
 )
 
@@ -30,9 +32,13 @@ import (
 var RootCmd = &cobra.Command{
 	Use:   "ec",
 	Short: "Enterprise Contract CLI",
-	Long: `Enterprise Contract CLI
 
-Set of commands to help validate resources with the Enterprise Contract.`,
+	Long: hd.Doc(`
+		Enterprise Contract CLI
+
+		Set of commands to help validate resources with the Enterprise Contract.
+	`),
+
 	SilenceUsage: true,
 
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
@@ -48,6 +54,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&quiet, "quiet", quiet, "less verbose output")
 	RootCmd.PersistentFlags().BoolVar(&verbose, "verbose", verbose, "more verbose output")
 	RootCmd.PersistentFlags().BoolVar(&debug, "debug", debug, "same as verbose but also show function names and line numbers")
+	kubernetes.AddKubeconfigFlag(RootCmd)
 }
 
 const globalTimeout = 5 * time.Minute

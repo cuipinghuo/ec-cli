@@ -23,8 +23,8 @@ import (
 	"github.com/spf13/afero"
 
 	"github.com/hacbs-contract/ec-cli/internal/evaluator"
+	"github.com/hacbs-contract/ec-cli/internal/policy"
 	"github.com/hacbs-contract/ec-cli/internal/policy/source"
-	"github.com/hacbs-contract/ec-cli/internal/utils"
 )
 
 var newConftestEvaluator = evaluator.NewConftestEvaluator
@@ -36,8 +36,8 @@ type DefinitionFile struct {
 }
 
 // NewPipelineDefinitionFile returns a DefinitionFile struct with FPath and evaluator ready to use
-func NewPipelineDefinitionFile(ctx context.Context, fpath string, policyRepo source.PolicyRepo, namespace string) (*DefinitionFile, error) {
-	exists, err := afero.Exists(utils.AppFS, fpath)
+func NewPipelineDefinitionFile(ctx context.Context, fs afero.Fs, fpath string, policyUrl source.PolicyUrl, namespace string) (*DefinitionFile, error) {
+	exists, err := afero.Exists(fs, fpath)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func NewPipelineDefinitionFile(ctx context.Context, fpath string, policyRepo sou
 	p := &DefinitionFile{
 		Fpath: fpath,
 	}
-	c, err := newConftestEvaluator(ctx, []source.PolicySource{&policyRepo}, namespace, nil)
+	c, err := newConftestEvaluator(ctx, fs, []source.PolicySource{&policyUrl}, namespace, &policy.Policy{})
 	if err != nil {
 		return nil, err
 	}

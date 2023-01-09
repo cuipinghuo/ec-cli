@@ -18,15 +18,11 @@ package utils
 
 import (
 	"bytes"
+	"path/filepath"
 	"unicode"
 
 	"github.com/ghodss/yaml"
 	"github.com/spf13/afero"
-)
-
-var (
-	AppFS        = afero.NewOsFs()
-	CreateTmpDir = afero.TempDir
 )
 
 // ToJSON converts a single YAML document into a JSON document
@@ -53,7 +49,25 @@ func hasPrefix(buf []byte, prefix []byte) bool {
 	return bytes.HasPrefix(trim, prefix)
 }
 
-// CreateWorkDir creates the working directory in tmp
-func CreateWorkDir() (string, error) {
-	return CreateTmpDir(AppFS, afero.GetTempDir(AppFS, ""), "ec-work-")
+// CreateWorkDir creates the working directory in tmp and some subdirectories
+func CreateWorkDir(fs afero.Fs) (string, error) {
+	workDir, err := afero.TempDir(fs, afero.GetTempDir(fs, ""), "ec-work-")
+	if err != nil {
+		return "", err
+	}
+
+	// Create top level directories for Conftest
+	for _, d := range []string{
+		"policy",
+		"data",
+		// Later maybe
+		//"input",
+	} {
+		err := fs.Mkdir(filepath.Join(workDir, d), 0o755)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return workDir, nil
 }

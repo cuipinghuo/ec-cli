@@ -14,6 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package output
 
 import (
@@ -21,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/open-policy-agent/conftest/output"
+	"github.com/sigstore/cosign/pkg/cosign"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -37,6 +40,10 @@ func Test_PrintExpectedJSON(t *testing.T) {
 		AttestationSignatureCheck: VerificationStatus{
 			Passed: false,
 			Result: &output.Result{Message: "message3"},
+		},
+		AttestationSyntaxCheck: VerificationStatus{
+			Passed: false,
+			Result: &output.Result{Message: "message4"},
 		},
 		PolicyCheck: []output.CheckResult{
 			{
@@ -67,6 +74,9 @@ func Test_PrintExpectedJSON(t *testing.T) {
 				},
 			},
 		},
+		Signatures: []cosign.Signatures{
+			cosign.Signatures{KeyID: "key-id", Sig: "signature"},
+		},
 		ExitCode: 42,
 	}
 
@@ -92,6 +102,12 @@ func Test_PrintExpectedJSON(t *testing.T) {
 		    "msg": "message3"
 		  }
 		},
+		"attestationSyntaxCheck": {
+			"passed": false,
+			"result": {
+			  "msg": "message4"
+			}
+		  },
 		"policyCheck": [
 		  {
 			"filename": "file1.json",
@@ -129,7 +145,8 @@ func Test_PrintExpectedJSON(t *testing.T) {
 			  }
 			]
 		  }
-		]
+		],
+		"signatures": [{"keyid": "key-id", "sig": "signature"}]
 	  }`, json.String())
 }
 
@@ -155,6 +172,9 @@ func Test_PrintOutputsExpectedJSON(t *testing.T) {
 		  "attestationSignatureCheck": {
 			"passed": false
 		  },
+		  "attestationSyntaxCheck": {
+			"passed": false
+		  },
 		  "policyCheck": null
 		},
 		{
@@ -165,6 +185,9 @@ func Test_PrintOutputsExpectedJSON(t *testing.T) {
 			"passed": false
 		  },
 		  "attestationSignatureCheck": {
+			"passed": false
+		  },
+		  "attestationSyntaxCheck": {
 			"passed": false
 		  },
 		  "policyCheck": null
@@ -190,6 +213,9 @@ func Test_Violations(t *testing.T) {
 				ImageAccessibleCheck: VerificationStatus{
 					Passed: true,
 				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: true,
+				},
 			},
 			expected: []output.Result{},
 		},
@@ -204,6 +230,9 @@ func Test_Violations(t *testing.T) {
 					Passed: true,
 				},
 				AttestationSignatureCheck: VerificationStatus{
+					Passed: true,
+				},
+				AttestationSyntaxCheck: VerificationStatus{
 					Passed: true,
 				},
 			},
@@ -222,6 +251,9 @@ func Test_Violations(t *testing.T) {
 					Passed: false,
 					Result: &output.Result{Message: "attestation signature failed"},
 				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: true,
+				},
 			},
 			expected: []output.Result{{Message: "attestation signature failed"}},
 		},
@@ -239,6 +271,9 @@ func Test_Violations(t *testing.T) {
 					Passed: false,
 					Result: &output.Result{Message: "attestation signature failed"},
 				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: true,
+				},
 			},
 			expected: []output.Result{
 				{Message: "image signature failed"},
@@ -255,6 +290,9 @@ func Test_Violations(t *testing.T) {
 					Passed: true,
 				},
 				AttestationSignatureCheck: VerificationStatus{
+					Passed: true,
+				},
+				AttestationSyntaxCheck: VerificationStatus{
 					Passed: true,
 				},
 				PolicyCheck: []output.CheckResult{
@@ -279,6 +317,9 @@ func Test_Violations(t *testing.T) {
 					Passed: true,
 				},
 				AttestationSignatureCheck: VerificationStatus{
+					Passed: true,
+				},
+				AttestationSyntaxCheck: VerificationStatus{
 					Passed: true,
 				},
 				PolicyCheck: []output.CheckResult{
@@ -312,6 +353,10 @@ func Test_Violations(t *testing.T) {
 					Passed: false,
 					Result: &output.Result{Message: "attestation signature failed"},
 				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: false,
+					Result: &output.Result{Message: "invalid attestation syntax"},
+				},
 				PolicyCheck: []output.CheckResult{
 					{
 						Failures: []output.Result{
@@ -328,6 +373,7 @@ func Test_Violations(t *testing.T) {
 			expected: []output.Result{
 				{Message: "image signature failed"},
 				{Message: "attestation signature failed"},
+				{Message: "invalid attestation syntax"},
 				{Message: "failed policy check 1"},
 				{Message: "failed policy check 2"},
 			},
@@ -345,6 +391,9 @@ func Test_Violations(t *testing.T) {
 				AttestationSignatureCheck: VerificationStatus{
 					Passed: false,
 					Result: &output.Result{Message: "attestation signature failed"},
+				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: true,
 				},
 				PolicyCheck: []output.CheckResult{
 					// Result with failures

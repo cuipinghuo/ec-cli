@@ -14,96 +14,156 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unit
+
 package cmd
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/static"
-	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
-	"github.com/tektoncd/pipeline/pkg/remote/oci"
-
-	"github.com/hacbs-contract/ec-cli/internal/image"
 )
 
-func Test_tektonBundleCollector(t *testing.T) {
-	defaultFetchImage := fetchImage
-	t.Cleanup(func() {
-		fetchImage = defaultFetchImage
-	})
-
+func Test_TrackBundleCommand(t *testing.T) {
 	cases := []struct {
-		name     string
-		kinds    []string
-		err      error
-		expected []string
+		name         string
+		args         []string
+		outputFile   string
+		expectUrls   []string
+		expectPrune  bool
+		expectInput  string
+		expectStdout bool
 	}{
 		{
-			name: "failed to fetch image",
-			err:  errors.New("expected"),
+			name: "simple",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+			},
+			expectPrune:  true,
+			expectUrls:   []string{"registry/image:tag"},
+			expectStdout: true,
 		},
 		{
-			name:     "a task and a pipeline",
-			kinds:    []string{"task", "pipeline"},
-			expected: []string{"task", "pipeline"},
+			name: "with output file",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--output",
+				"output-1.json",
+			},
+			outputFile:   "output-1.json",
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  true,
+			expectStdout: false,
 		},
 		{
-			name:     "a few tasks",
-			kinds:    []string{"task", "task"},
-			expected: []string{"task"},
+			name: "with input file",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--input",
+				"input-3.json",
+			},
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  true,
+			expectInput:  "input-3.json",
+			expectStdout: true,
 		},
 		{
-			name:     "a few pipelines",
-			kinds:    []string{"pipeline", "pipeline", "pipeline"},
-			expected: []string{"pipeline"},
+			name: "with input file replace",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--input",
+				"tracker-3.json",
+				"--replace",
+			},
+			outputFile:   "tracker-3.json",
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  true,
+			expectInput:  "tracker-3.json",
+			expectStdout: true,
 		},
 		{
-			name:     "multiple tasks and multiple pipelines",
-			kinds:    []string{"task", "pipeline", "pipeline", "task", "task"},
-			expected: []string{"task", "pipeline"},
+			name: "with input and output files",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--input",
+				"input-4.json",
+				"--output",
+				"output-4.json",
+			},
+			outputFile:   "output-4.json",
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  true,
+			expectInput:  "input-4.json",
+			expectStdout: false,
+		},
+		{
+			name: "with explicit prune",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--prune",
+			},
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  true,
+			expectStdout: true,
+		},
+		{
+			name: "without prune",
+			args: []string{
+				"--bundle",
+				"registry/image:tag",
+				"--prune=false",
+			},
+			expectUrls:   []string{"registry/image:tag"},
+			expectPrune:  false,
+			expectStdout: true,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			fetchImage = func(name name.Reference, _ ...remote.Option) (v1.Image, error) {
-				if c.err != nil {
-					return nil, c.err
-				}
+			fs := afero.NewMemMapFs()
+			ctx := withFs(context.TODO(), fs)
 
-				img := empty.Image
-
-				var err error
-				for _, k := range c.kinds {
-					if img, err = mutate.Append(img, mutate.Addendum{
-						Layer: static.NewLayer([]byte{}, types.OCILayer),
-						Annotations: map[string]string{
-							oci.KindAnnotation: k,
-						},
-					}); err != nil {
-						return nil, err
-					}
-				}
-
-				return img, nil
-			}
-
-			got, err := tektonBundleCollector(context.TODO(), image.ImageReference{})
-			if c.err != nil {
-				assert.Equal(t, c.err, err)
-			} else {
+			if c.expectInput != "" {
+				err := afero.WriteFile(fs, c.expectInput, []byte(`{"spam": true}`), 0777)
 				assert.NoError(t, err)
 			}
+			testOutput := `{"test": true}`
+			track := func(ctx context.Context, fs afero.Fs, urls []string, input string, prune bool) ([]byte, error) {
+				assert.Equal(t, c.expectUrls, urls)
+				assert.Equal(t, c.expectInput, input)
+				assert.Equal(t, c.expectPrune, prune)
+				return []byte(testOutput), nil
+			}
+			cmd := trackBundleCmd(track)
+			cmd.SetContext(ctx)
+			cmd.SetArgs(c.args)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			err := cmd.Execute()
+			assert.NoError(t, err)
 
-			assert.ElementsMatch(t, c.expected, got)
+			if c.expectStdout {
+				assert.JSONEq(t, testOutput, out.String())
+			} else {
+				assert.Empty(t, out.String())
+			}
+
+			if c.outputFile != "" {
+				actualOutput, err := afero.ReadFile(fs, c.outputFile)
+				assert.NoError(t, err)
+				assert.JSONEq(t, testOutput, string(actualOutput))
+			}
 		})
 	}
+
 }
