@@ -34,19 +34,29 @@ jobs:
       TASK: task/0.1/verify-enterprise-contract.yaml
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: release-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            release-${{ runner.os }}-go-
 
       - name: Setup Go environment
         uses: actions/setup-go@v3
         with:
-          cache: true
           go-version-file: go.mod
-          cache-dependency-path: '**/go.sum'
 
       - name: Download go dependencies
         run: |
           go mod download
-          go mod download -modfile internal/tools/go.mod
+          go mod download -modfile tools/go.mod
+          go mod download -modfile acceptance/go.mod
 
       - name: Build distribution
         run: make dist
@@ -68,13 +78,7 @@ jobs:
           git push -f --tags
 
       - name: Release
-        # we're using our own fork with
-        # https://github.com/softprops/action-gh-release/pull/275 on top of it,
-        # seems to solve a number of issues:
-        # - https://github.com/softprops/action-gh-release/issues/268
-        # - https://github.com/softprops/action-gh-release/issues/265
-        # - https://github.com/softprops/action-gh-release/issues/263
-        uses: hacbs-contract/action-gh-release@v2
+        uses: softprops/action-gh-release@v1
         with:
           prerelease: true
           name: Development snapshot
@@ -94,3 +98,24 @@ jobs:
 
       - name: Create and push the tekton bundle
         run: make task-bundle-snapshot TASK_TAG=$TAG TASK=<( yq e ".spec.steps[].image? = \"$IMAGE_REPO:$TAG\"" $TASK)
+
+      - name: Update infra-deployments
+        env:
+          EC_AUTOMATION_KEY: ${{ secrets.EC_AUTOMATION_KEY }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          APP_INSTALL_ID: 32872589
+        run: |
+          set -o errexit
+          set -o pipefail
+          set -o nounset
+
+          function createJWT() {
+            local header=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 | sed s/\+/-/ | sed -E s/=+$//)
+            local now_utc=$(date --utc +%s)
+            local payload=$(echo -n '{"iat":'$((now_utc - 60))',"exp":'$((now_utc + 120))',"iss":245286}' | base64 | sed s/\+/-/ | sed -E s/=+$//)
+            local signature=$(echo -n "${header}.${payload}" | openssl dgst -sha256 -binary -sign <(echo "${EC_AUTOMATION_KEY}")| base64 | tr -d '\n=' | tr -- '+/' '-_')
+            echo "${header}.${payload}.${signature}"
+          }
+
+          GITHUB_TOKEN=$(curl -s -X POST -H "Authorization: Bearer $(createJWT)" -H "Accept: application/vnd.github+json" "https://api.github.com/app/installations/${APP_INSTALL_ID}/access_tokens" | jq -r .token) \
+          hack/pr-infra-deployments.sh "${TAG}"

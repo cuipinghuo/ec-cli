@@ -24,23 +24,25 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 
+	"github.com/hacbs-contract/ec-cli/internal/format"
 	"github.com/hacbs-contract/ec-cli/internal/output"
+	"github.com/hacbs-contract/ec-cli/internal/pipeline"
 	"github.com/hacbs-contract/ec-cli/internal/policy/source"
 )
 
-type pipelineValidationFn func(context.Context, afero.Fs, string, source.PolicyUrl, string) (*output.Output, error)
+type pipelineValidationFn func(context.Context, afero.Fs, string, []source.PolicySource) (*output.Output, error)
 
 func validatePipelineCmd(validate pipelineValidationFn) *cobra.Command {
 	var data = struct {
-		FilePaths         []string
-		PolicyUrl         string
-		Ref               string
-		ConftestNamespace string
+		filePaths  []string
+		policyURLs []string
+		dataURLs   []string
+		output     []string
 	}{
-		FilePaths:         []string{},
-		PolicyUrl:         "quay.io/hacbs-contract/ec-release-policy:latest",
-		ConftestNamespace: "pipeline.main",
-		Ref:               "main",
+		filePaths:  []string{},
+		policyURLs: []string{"oci::quay.io/hacbs-contract/ec-pipeline-policy:latest"},
+		dataURLs:   []string{"git::https://github.com/hacbs-contract/ec-policies.git//data"},
+		output:     []string{"json"},
 	}
 	cmd := &cobra.Command{
 		Use:   "pipeline",
@@ -62,41 +64,59 @@ func validatePipelineCmd(validate pipelineValidationFn) *cobra.Command {
 
 			  ec validate pipeline --pipeline-file </path/to/pipeline/file> --pipeline-file /path/to/other-pipeline.file
 
-			Specify a different location for the policies:
+			Specify different policy and data sources:
 
 			  ec validate pipeline --pipeline-file </path/to/pipeline/file> \
-				--policy git::https://example.com/user/repo.git//policy?ref=main --namespace pipeline.basic
+				--policy git::https://github.com/hacbs-contract/ec-policies//policy/lib \
+				--policy git::https://github.com/hacbs-contract/ec-policies//policy/pipeline \
+				--data git::https://github.com/hacbs-contract/ec-policies//data
 		`),
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var err error
-			var outputs output.Outputs
-			for i := range data.FilePaths {
-				fpath := data.FilePaths[i]
-				policySource := source.PolicyUrl{Url: data.PolicyUrl, Kind: source.PolicyKind}
+			var allErrors error
+			report := pipeline.Report{}
+			for i := range data.filePaths {
+				fpath := data.filePaths[i]
+				var sources []source.PolicySource
+				for _, url := range data.policyURLs {
+					sources = append(sources, &source.PolicyUrl{Url: url, Kind: source.PolicyKind})
+				}
+				for _, url := range data.dataURLs {
+					sources = append(sources, &source.PolicyUrl{Url: url, Kind: source.DataKind})
+				}
 				ctx := cmd.Context()
-				if o, e := validate(ctx, fs(ctx), fpath, policySource, data.ConftestNamespace); e != nil {
-					err = multierror.Append(err, e)
+				if o, err := validate(ctx, fs(ctx), fpath, sources); err != nil {
+					allErrors = multierror.Append(allErrors, err)
 				} else {
-					outputs = append(outputs, o)
+					report.Add(*o)
 				}
 			}
-			outputs.Print(cmd.OutOrStdout())
-			if err != nil {
-				return err
+			p := format.NewTargetParser(pipeline.JSONReport, cmd.OutOrStdout(), fs(cmd.Context()))
+			for _, target := range data.output {
+				if err := report.Write(target, p); err != nil {
+					allErrors = multierror.Append(allErrors, err)
+				}
+			}
+			if allErrors != nil {
+				return allErrors
 			}
 			return nil
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&data.FilePaths, "pipeline-file", "p", data.FilePaths,
+	cmd.Flags().StringSliceVarP(&data.filePaths, "pipeline-file", "p", data.filePaths,
 		"path to pipeline definition YAML/JSON file (required)")
 
-	cmd.Flags().StringVar(&data.PolicyUrl, "policy", data.PolicyUrl,
-		"git repo containing policies")
+	cmd.Flags().StringSliceVar(&data.policyURLs, "policy", data.policyURLs,
+		"url for policies, go-getter style. May be used multiple times")
 
-	cmd.Flags().StringVar(&data.ConftestNamespace, "namespace", data.ConftestNamespace,
-		"rego namespace within policy repo")
+	cmd.Flags().StringSliceVar(&data.dataURLs, "data", data.dataURLs,
+		"url for policy data, go-getter style. May be used multiple times")
+
+	cmd.Flags().StringSliceVarP(&data.output, "output", "o", data.output, hd.Doc(`
+		write output to a file in a specific format, e.g. yaml=/tmp/output.yaml. Use empty string
+		path for stdout, e.g. yaml. May be used multiple times. Possible formats are json and yaml
+	`))
 
 	if err := cmd.MarkFlagRequired("pipeline-file"); err != nil {
 		panic(err)

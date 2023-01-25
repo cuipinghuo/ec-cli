@@ -31,19 +31,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: checks-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            checks-${{ runner.os }}-go-
 
       - name: Setup Go environment
         uses: actions/setup-go@v3
         with:
-          cache: true
           go-version-file: go.mod
-          cache-dependency-path: '**/go.sum'
 
       - name: Download go dependencies
         run: |
           go mod download
-          go mod download -modfile internal/tools/go.mod
+          go mod download -modfile tools/go.mod
+          go mod download -modfile acceptance/go.mod
 
       - name: Test
         run: make test
@@ -80,19 +90,27 @@ jobs:
     env:
       TASK_BUNDLE_REF: registry.image-registry.svc.cluster.local:5000/ec-task-bundle
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: checks-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            checks-${{ runner.os }}-go-
 
       - name: Setup Go environment
         uses: actions/setup-go@v3
         with:
-          cache: true
           go-version-file: go.mod
-          cache-dependency-path: '**/go.sum'
 
       - name: Download go dependencies
         run: |
           go mod download
-          go mod download -modfile internal/tools/go.mod
 
       - name: Setup Tekton Test environment
         run: hack/setup-test-environment.sh

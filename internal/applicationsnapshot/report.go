@@ -19,8 +19,6 @@ package applicationsnapshot
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"strings"
 	"time"
 
 	"github.com/ghodss/yaml"
@@ -28,9 +26,8 @@ import (
 	"github.com/open-policy-agent/conftest/output"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
 	"github.com/sigstore/cosign/pkg/cosign"
-	"github.com/spf13/afero"
 
-	"github.com/hacbs-contract/ec-cli/internal/evaluation_target/application_snapshot_image"
+	"github.com/hacbs-contract/ec-cli/internal/format"
 )
 
 type Component struct {
@@ -64,6 +61,9 @@ type componentSummary struct {
 }
 
 // hacbsReport represents the standardized HACBS_TEST_OUTPUT format.
+// The `Namespace` attribute is required for the HACBS results API. However,
+// it is always an empty string from the ec-cli as a way to indicate all
+// namespaces were used.
 type hacbsReport struct {
 	Timestamp time.Time `json:"timestamp"`
 	Namespace string    `json:"namespace"`
@@ -103,14 +103,16 @@ func NewReport(components []Component, key string) Report {
 }
 
 // WriteAll writes the report to all the given targets.
-func (r Report) WriteAll(targets []string, defaultWriter io.Writer, fs afero.Fs) (allErrors error) {
+func (r Report) WriteAll(targets []string, p format.TargetParser) (allErrors error) {
 	if len(targets) == 0 {
 		targets = append(targets, JSON)
 	}
-	for _, target := range targets {
-		if writer, err := newReportWriter(target, defaultWriter, fs); err != nil {
+	for _, targetName := range targets {
+		target := p.Parse(targetName)
+
+		if data, err := r.toFormat(target.Format); err != nil {
 			allErrors = multierror.Append(allErrors, err)
-		} else if err := writer.Write(r); err != nil {
+		} else if _, err := target.Write(data); err != nil {
 			allErrors = multierror.Append(allErrors, err)
 		}
 	}
@@ -182,10 +184,7 @@ func condensedMsg(results []output.Result) map[string][]string {
 // toHACBS returns a version of the report that conforms to the
 // HACBS_TEST_OUTPUT format.
 func (r *Report) toHACBS() hacbsReport {
-	result := hacbsReport{
-		Namespace: application_snapshot_image.ConftestNamespace,
-		Timestamp: r.created,
-	}
+	result := hacbsReport{Timestamp: r.created}
 
 	hasFailures := false
 	for _, component := range r.Components {
@@ -212,61 +211,4 @@ func (r *Report) toHACBS() hacbsReport {
 	}
 
 	return result
-}
-
-type reportWriter struct {
-	format string
-	writer io.Writer
-}
-
-// Write converts the report to a specific format, and writes it out.
-func (o *reportWriter) Write(report Report) error {
-	data, err := report.toFormat(o.format)
-	if err != nil {
-		return err
-	}
-	_, err = o.writer.Write(data)
-	return err
-}
-
-// newReportWriter creates a new instance of reportWriter from a given target.
-// If a filename is not provided in the target, the defaultWriter is used.
-// If a format is not specified, JSON is used.
-func newReportWriter(target string, defaultWriter io.Writer, fs afero.Fs) (reportWriter, error) {
-	var format, path string
-	parts := strings.SplitN(target, "=", 2)
-	switch len(parts) {
-	case 1:
-		format = parts[0]
-	case 2:
-		format = parts[0]
-		path = parts[1]
-	}
-
-	if len(format) == 0 {
-		format = JSON
-	}
-
-	writer := defaultWriter
-	if len(path) != 0 {
-		writer = fileWriter{path: path, fs: fs}
-	}
-
-	return reportWriter{format: format, writer: writer}, nil
-}
-
-// fileWriter is a simple struct that allows writing to a file on-demand.
-type fileWriter struct {
-	path string
-	fs   afero.Fs
-}
-
-// Write the given data to a certain path.
-func (w fileWriter) Write(data []byte) (int, error) {
-	file, err := w.fs.Create(w.path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-	return file.Write(data)
 }
