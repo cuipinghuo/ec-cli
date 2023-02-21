@@ -26,6 +26,7 @@ import (
 	"time"
 
 	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
+	"github.com/hashicorp/go-multierror"
 	"github.com/sigstore/cosign/cmd/cosign/cli/rekor"
 	"github.com/sigstore/cosign/pkg/cosign"
 	cosignSig "github.com/sigstore/cosign/pkg/signature"
@@ -34,21 +35,72 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hacbs-contract/ec-cli/internal/kubernetes"
+	e "github.com/hacbs-contract/ec-cli/pkg/error"
 )
 
-type Policy struct {
+const (
+	Now           = "now"
+	AtAttestation = "attestation"
+	DateFormat    = "2006-01-02"
+)
+
+var (
+	PO001 = e.NewError("PO001", "Invalid policy time argument", e.ErrorExitStatus)
+)
+
+// allows controlling time in tests
+var now = time.Now
+
+type Policy interface {
+	PublicKeyPEM() ([]byte, error)
+	CheckOpts() (*cosign.CheckOpts, error)
+	WithSpec(spec ecc.EnterpriseContractPolicySpec) Policy
+	Spec() ecc.EnterpriseContractPolicySpec
+	EffectiveTime() time.Time
+	AttestationTime(time.Time)
+}
+
+type policy struct {
 	ecc.EnterpriseContractPolicySpec
-	CheckOpts     *cosign.CheckOpts
-	EffectiveTime time.Time
+	checkOpts       *cosign.CheckOpts
+	choosenTime     string
+	effectiveTime   *time.Time
+	attestationTime *time.Time
 }
 
 // PublicKeyPEM returns the PublicKey in PEM format.
-func (p *Policy) PublicKeyPEM() ([]byte, error) {
-	pk, err := p.CheckOpts.SigVerifier.PublicKey()
+func (p *policy) PublicKeyPEM() ([]byte, error) {
+	pk, err := p.checkOpts.SigVerifier.PublicKey()
 	if err != nil {
 		return []byte{}, err
 	}
 	return cryptoutils.MarshalPublicKeyToPEM(pk)
+}
+
+func (p *policy) CheckOpts() (*cosign.CheckOpts, error) {
+	if p.checkOpts == nil {
+		return nil, errors.New("no check options configured")
+	}
+	return p.checkOpts, nil
+}
+
+func (p *policy) Spec() ecc.EnterpriseContractPolicySpec {
+	return p.EnterpriseContractPolicySpec
+}
+
+// NewOfflinePolicy construct and return a new instance of Policy that is used
+// in offline scenarios, i.e. without cluster or specific services access, and
+// no signature verification being performed.
+func NewOfflinePolicy(ctx context.Context, effectiveTime string) (Policy, error) {
+	if efn, err := parseEffectiveTime(effectiveTime); err == nil {
+		return &policy{
+			effectiveTime: efn,
+			choosenTime:   effectiveTime,
+			checkOpts:     &cosign.CheckOpts{},
+		}, nil
+	} else {
+		return nil, err
+	}
 }
 
 // NewPolicy construct and return a new instance of Policy.
@@ -64,14 +116,15 @@ func (p *Policy) PublicKeyPEM() ([]byte, error) {
 //
 // The public key is resolved as part of object construction. If the public key is a reference
 // to a kubernetes resource, for example, the cluster will be contacted.
-func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTime string) (*Policy, error) {
-	var p *Policy
+func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTime string) (Policy, error) {
+	p := policy{
+		choosenTime: effectiveTime,
+	}
 
 	if policyRef == "" {
 		log.Debug("Using an empty EnterpriseContractPolicy")
 		// Default to an empty policy instead of returning an error because the required
 		// values, e.g. PublicKey, may be provided via other means, e.g. publicKey param.
-		p = &Policy{}
 	} else if strings.Contains(policyRef, "{") {
 		log.Debug("Read EnterpriseContractPolicy as JSON")
 		if err := json.Unmarshal([]byte(policyRef), &p); err != nil {
@@ -92,7 +145,7 @@ func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTim
 			log.Debug("Failed to fetch the enterprise contract policy from the cluster!")
 			return nil, fmt.Errorf("unable to fetch EnterpriseContractPolicy: %w", err)
 		}
-		p = &Policy{EnterpriseContractPolicySpec: ecp.Spec}
+		p.EnterpriseContractPolicySpec = ecp.Spec
 	}
 
 	if rekorUrl != "" && rekorUrl != p.RekorUrl {
@@ -109,31 +162,84 @@ func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTim
 		return nil, errors.New("policy must provide a public key")
 	}
 
-	if effectiveTime == "" {
-		p.EffectiveTime = time.Now()
-		log.Debugf("Using current time %s", p.EffectiveTime.Format(time.RFC3339))
-	} else {
-		if when, err := time.Parse(time.RFC3339, effectiveTime); err != nil {
-			log.Debugf("Unable to parse time string %s", effectiveTime)
-			return nil, err
-		} else {
-			p.EffectiveTime = when
-			log.Debugf("Using custom effective time %s", p.EffectiveTime.Format(time.RFC3339))
-		}
-	}
-
-	if opts, err := checkOpts(ctx, p); err != nil {
+	if efn, err := parseEffectiveTime(effectiveTime); err != nil {
 		return nil, err
 	} else {
-		p.CheckOpts = opts
+		p.effectiveTime = efn
 	}
 
-	// log.Debugf("policy: %#v", p)
-	return p, nil
+	if opts, err := checkOpts(ctx, &p); err != nil {
+		return nil, err
+	} else {
+		p.checkOpts = opts
+	}
+
+	return &p, nil
+}
+
+func (p *policy) WithSpec(spec ecc.EnterpriseContractPolicySpec) Policy {
+	p.EnterpriseContractPolicySpec = spec
+
+	return p
+}
+
+func (p *policy) AttestationTime(attestationTime time.Time) {
+	p.attestationTime = &attestationTime
+	if p.choosenTime == AtAttestation {
+		p.effectiveTime = &attestationTime
+	}
+}
+
+func (p policy) EffectiveTime() time.Time {
+	if p.effectiveTime == nil {
+		now := now().UTC()
+		log.Debugf("No effective time choosen using current time: %s", now.Format(time.RFC3339))
+		p.effectiveTime = &now
+	} else {
+		log.Debugf("Using effective time: %s", p.effectiveTime.Format(time.RFC3339))
+	}
+
+	return *p.effectiveTime
+}
+
+func isNow(choosenTime string) bool {
+	return strings.EqualFold(choosenTime, Now)
+}
+
+func parseEffectiveTime(choosenTime string) (*time.Time, error) {
+	switch {
+	case isNow(choosenTime):
+		now := now().UTC()
+		log.Debugf("Chosen to use effective time of `now`, using current time %s", now.Format(time.RFC3339))
+		return &now, nil
+	case strings.EqualFold(choosenTime, AtAttestation):
+		log.Debugf("Chosen to use effective time of `attestation`")
+		return nil, nil
+	default:
+		var err error
+		if when, err := time.Parse(time.RFC3339, choosenTime); err == nil {
+			log.Debugf("Using provided effective time %s", when.Format(time.RFC3339))
+			whenUTC := when.UTC()
+			return &whenUTC, nil
+		}
+
+		log.Debugf("Unable to parse provided effective time `%s` using RFC3339", choosenTime)
+		errs := multierror.Append(err)
+
+		if when, err := time.Parse(DateFormat, choosenTime); err == nil {
+			log.Debugf("Using provided effective time %s", when.Format(time.RFC3339))
+			whenUTC := when.UTC()
+			return &whenUTC, nil
+		}
+		log.Debugf("Unable to provided effective time string `%s` using %s format", choosenTime, DateFormat)
+		errs = multierror.Append(errs, err)
+
+		return nil, PO001.CausedBy(errs)
+	}
 }
 
 // checkOpts returns an instance based on attributes of the Policy.
-func checkOpts(ctx context.Context, p *Policy) (*cosign.CheckOpts, error) {
+func checkOpts(ctx context.Context, p *policy) (*cosign.CheckOpts, error) {
 	opts := cosign.CheckOpts{}
 
 	verifier, err := signatureVerifier(ctx, p)
@@ -184,7 +290,7 @@ func newSignatureClient(ctx context.Context) signatureClient {
 }
 
 // signatureVerifier creates a new instance based on the PublicKey from the Policy.
-func signatureVerifier(ctx context.Context, p *Policy) (sigstoreSig.Verifier, error) {
+func signatureVerifier(ctx context.Context, p *policy) (sigstoreSig.Verifier, error) {
 	publicKey := p.PublicKey
 
 	if strings.Contains(publicKey, "-----BEGIN PUBLIC KEY-----") {
@@ -197,7 +303,6 @@ func signatureVerifier(ctx context.Context, p *Policy) (sigstoreSig.Verifier, er
 
 	verifier, err := newSignatureClient(ctx).publicKeyFromKeyRef(ctx, publicKey)
 	if err != nil {
-		// log.Debugf("Problem creating signature verifier using public key %q", publicKey)
 		return nil, err
 	}
 	return verifier, nil

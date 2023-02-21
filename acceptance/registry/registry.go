@@ -18,12 +18,17 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/pkg/diff"
 	"github.com/pkg/errors"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -127,6 +132,16 @@ func IsRunning(ctx context.Context) bool {
 	return state.Up()
 }
 
+// Url returns the host:port needed to interact with the registry
+func Url(ctx context.Context) (string, error) {
+	if !testenv.HasState[registryState](ctx) {
+		return "", errors.New("no state setup, did you start the registry stub server?")
+	}
+
+	state := testenv.FetchState[registryState](ctx)
+	return state.HostAndPort, nil
+}
+
 // AllHashes returns a map of image hashes keyed by `repository:tag` for all
 // images stored in the registry
 func AllHashes(ctx context.Context) (map[string]string, error) {
@@ -176,7 +191,65 @@ func AllHashes(ctx context.Context) (map[string]string, error) {
 	return all, nil
 }
 
+func assertImageContent(ctx context.Context, imageRef string, data *godog.DocString) error {
+	state := testenv.FetchState[registryState](ctx)
+
+	ref, err := name.ParseReference(fmt.Sprintf("%s/%s", state.HostAndPort, imageRef))
+	if err != nil {
+		return err
+	}
+
+	img, err := remote.Image(ref)
+	if err != nil {
+		return err
+	}
+
+	layers, err := img.Layers()
+	if err != nil {
+		return err
+	}
+
+	if len(layers) != 1 {
+		return fmt.Errorf("unexpected number of layers: %d, expecting only one", len(layers))
+	}
+
+	in, err := layers[0].Uncompressed()
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	content, err := io.ReadAll(in)
+	if err != nil {
+		return err
+	}
+
+	vals := map[string]string{
+		"REGISTRY":           state.HostAndPort,
+		"TODAY_PLUS_30_DAYS": time.Now().Round(time.Hour*24).UTC().AddDate(0, 0, 30).Format(time.RFC3339),
+	}
+
+	expected := os.Expand(data.Content, func(key string) string {
+		return vals[key]
+	})
+
+	got := string(content)
+
+	if expected == got {
+		return nil
+	}
+
+	var b bytes.Buffer
+	err = diff.Text("layer", "expected", got, expected, &b)
+	if err != nil {
+		return err
+	}
+
+	return fmt.Errorf("expected image layer and actual image layer differ:\n%s", b.String())
+}
+
 // AddStepsTo adds Gherkin steps to the godog ScenarioContext
 func AddStepsTo(sc *godog.ScenarioContext) {
 	sc.Step(`^stub registry running$`, startStubRegistry)
+	sc.Step(`^registry image "([^"]*)" should contain a layer with$`, assertImageContent)
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -50,16 +51,18 @@ type conftestEvaluator struct {
 	workDir       string
 	dataDir       string
 	policyDir     string
-	policy        *policy.Policy
+	policy        policy.Policy
+	fs            afero.Fs
 }
 
 // NewConftestEvaluator returns initialized conftestEvaluator implementing
 // Evaluator interface
-func NewConftestEvaluator(ctx context.Context, fs afero.Fs, policySources []source.PolicySource, p *policy.Policy) (Evaluator, error) {
+func NewConftestEvaluator(ctx context.Context, fs afero.Fs, policySources []source.PolicySource, p policy.Policy) (Evaluator, error) {
 	c := conftestEvaluator{
 		policySources: policySources,
 		outputFormat:  "json",
 		policy:        p,
+		fs:            fs,
 	}
 
 	dir, err := utils.CreateWorkDir(fs)
@@ -80,6 +83,13 @@ func NewConftestEvaluator(ctx context.Context, fs afero.Fs, policySources []sour
 
 	log.Debug("Conftest test runner created")
 	return c, nil
+}
+
+// Destroy removes the working directory
+func (c conftestEvaluator) Destroy() {
+	if os.Getenv("EC_DEBUG") == "" {
+		_ = c.fs.RemoveAll(c.workDir)
+	}
 }
 
 func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]output.CheckResult, error) {
@@ -116,7 +126,8 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 		return nil, err
 	}
 
-	now := c.policy.EffectiveTime
+	effectiveTime := c.policy.EffectiveTime()
+
 	for i, result := range runResults {
 		warnings := []output.Result{}
 		failures := []output.Result{}
@@ -134,7 +145,7 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 				log.Debugf("Skipping result failure: %#v", failure)
 				continue
 			}
-			if !isResultEffective(failure, now) {
+			if !isResultEffective(failure, effectiveTime) {
 				// TODO: Instead of moving to warnings, create new attribute: "futureViolations"
 				warnings = append(warnings, failure)
 			} else {
@@ -150,12 +161,26 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 
 	results = append(results, runResults...)
 
+	// Evaluate total successes, warnings, and failures. If all are 0, then
+	// we have effectively failed, because no tests were actually ran due to
+	// input error, etc.
+	var total int
+
+	for _, res := range results {
+		total += res.Successes
+		total += len(res.Warnings)
+		total += len(res.Failures)
+	}
+	if total == 0 {
+		log.Error("no successes, warnings, or failures, check input")
+		return nil, fmt.Errorf("no successes, warnings, or failures, check input")
+	}
 	return results, nil
 }
 
 // createConfigJSON creates the config.json file with the provided configuration
 // in the data directory
-func createConfigJSON(fs afero.Fs, dataDir string, p *policy.Policy) error {
+func createConfigJSON(ctx context.Context, fs afero.Fs, dataDir string, p policy.Policy) error {
 	if p == nil {
 		return nil
 	}
@@ -182,22 +207,24 @@ func createConfigJSON(fs afero.Fs, dataDir string, p *policy.Policy) error {
 	pc := &policyConfig{}
 
 	// TODO: Once the NonBlocking field has been removed, update to dump the spec.Config into an updated policyConfig struct
-	if p.Exceptions != nil {
+	if p.Spec().Exceptions != nil {
 		log.Debug("Non-blocking exceptions found. These will be written to file ", dataDir)
-		pc.NonBlocking = &p.Exceptions.NonBlocking
+		pc.NonBlocking = &p.Spec().Exceptions.NonBlocking
 	}
-	if p.Configuration != nil {
+
+	cfg := p.Spec().Configuration
+	if cfg != nil {
 		log.Debug("Include rules found. These will be written to file ", dataDir)
-		if p.Configuration.Include != nil {
-			pc.Include = &p.Configuration.Include
+		if cfg.Include != nil {
+			pc.Include = &cfg.Include
 		}
 		log.Debug("Exclude rules found. These will be written to file ", dataDir)
-		if p.Configuration.Exclude != nil {
-			pc.Exclude = &p.Configuration.Exclude
+		if cfg.Exclude != nil {
+			pc.Exclude = &cfg.Exclude
 		}
 		log.Debug("Collections found. These will be written to file ", dataDir)
-		if p.Configuration.Collections != nil {
-			pc.Collections = &p.Configuration.Collections
+		if cfg.Collections != nil {
+			pc.Collections = &cfg.Collections
 		}
 	}
 
@@ -205,7 +232,7 @@ func createConfigJSON(fs afero.Fs, dataDir string, p *policy.Policy) error {
 	// this field is used only for the checking the effective times in the
 	// acceptable bundles list. Always set it, even when we are using the current
 	// time, so that a consistent current time is used everywhere.
-	pc.WhenNs = p.EffectiveTime.UnixNano()
+	pc.WhenNs = p.EffectiveTime().UnixNano()
 
 	// Add the policy config we just prepared
 	config["config"] = map[string]interface{}{
@@ -248,7 +275,7 @@ func (c *conftestEvaluator) createDataDirectory(ctx context.Context, fs afero.Fs
 		_ = fs.MkdirAll(dataDir, 0755)
 	}
 
-	if err := createConfigJSON(fs, dataDir, c.policy); err != nil {
+	if err := createConfigJSON(ctx, fs, dataDir, c.policy); err != nil {
 		return err
 	}
 
@@ -283,31 +310,36 @@ func isResultEffective(failure output.Result, now time.Time) bool {
 // isResultIncluded returns whether or not the result should be included or
 // discarded based on the policy configuration.
 func (c conftestEvaluator) isResultIncluded(result output.Result) bool {
-	matchers := makeMatchers(extractCode(result))
-	includes := []string{"*"}
-	excludes := []string{}
-	if c.policy.Configuration != nil {
-		// If collections is not empty, then only include rules that mention
-		// the collection.
-		if len(c.policy.Configuration.Collections) > 0 {
-			collections := extractCollections(result)
-			if !hasAnyMatch(collections, c.policy.Configuration.Collections) {
-				return false
-			}
+	ruleMatchers := makeMatchers(result)
+	collectionMatchers := extractCollections(result)
+	var includes, excludes, collections []string
+
+	spec := c.policy.Spec()
+	cfg := spec.Configuration
+	if cfg != nil {
+		if len(cfg.Collections) > 0 {
+			collections = cfg.Collections
 		}
-		if len(c.policy.Configuration.Include) > 0 {
-			includes = c.policy.Configuration.Include
+		if len(cfg.Include) > 0 {
+			includes = cfg.Include
 		}
-		if len(c.policy.Configuration.Exclude) > 0 {
-			excludes = c.policy.Configuration.Exclude
+		if len(cfg.Exclude) > 0 {
+			excludes = cfg.Exclude
 		}
 	}
 
-	if c.policy.Exceptions != nil {
+	if spec.Exceptions != nil {
 		// TODO: NonBlocking is deprecated. Remove it eventually
-		excludes = append(excludes, c.policy.Exceptions.NonBlocking...)
+		excludes = append(excludes, spec.Exceptions.NonBlocking...)
 	}
-	return hasAnyMatch(matchers, includes) && !hasAnyMatch(matchers, excludes)
+
+	if len(includes)+len(collections) == 0 {
+		includes = []string{"*"}
+	}
+
+	isIncluded := hasAnyMatch(collectionMatchers, collections) || hasAnyMatch(ruleMatchers, includes)
+	isExcluded := hasAnyMatch(ruleMatchers, excludes)
+	return isIncluded && !isExcluded
 }
 
 // hasAnyMatch returns true if the haystack contains any of the needles.
@@ -320,8 +352,10 @@ func hasAnyMatch(needles, haystack []string) bool {
 	return false
 }
 
-// makeMatchers returns the possible matching strings for the code.
-func makeMatchers(code string) []string {
+// makeMatchers returns the possible matching strings for the result.
+func makeMatchers(result output.Result) []string {
+	code := extractStringFromMetadata(result, "code")
+	term := extractStringFromMetadata(result, "term")
 	parts := strings.Split(code, ".")
 	var pkg string
 	if len(parts) >= 2 {
@@ -329,10 +363,21 @@ func makeMatchers(code string) []string {
 	}
 	rule := parts[len(parts)-1]
 
-	matchers := []string{"*"}
+	var matchers []string
+
 	if pkg != "" {
-		matchers = append(matchers, pkg, fmt.Sprintf("%s.%s", pkg, rule))
+		matchers = append(matchers, pkg, fmt.Sprintf("%s.*", pkg), fmt.Sprintf("%s.%s", pkg, rule))
 	}
+
+	// A term can be applied to any of the package matchers above.
+	if term != "" {
+		for i, l := 0, len(matchers); i < l; i++ {
+			matchers = append(matchers, fmt.Sprintf("%s:%s", matchers[i], term))
+		}
+	}
+
+	matchers = append(matchers, "*")
+
 	return matchers
 }
 
@@ -351,11 +396,11 @@ func extractCollections(result output.Result) []string {
 	return collections
 }
 
-// extractCode returns the code encoded in the result metadata.
-func extractCode(result output.Result) string {
-	if maybeCode, exists := result.Metadata["code"]; exists {
-		if code, ok := maybeCode.(string); ok {
-			return code
+// extractStringFromMetadata returns the string value from the result metadata at the given key.
+func extractStringFromMetadata(result output.Result, key string) string {
+	if maybeValue, exists := result.Metadata[key]; exists {
+		if value, ok := maybeValue.(string); ok {
+			return value
 		}
 	}
 	return ""

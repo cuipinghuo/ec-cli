@@ -1,2 +1,0 @@
-# Verify Enterprise Contract Task
-

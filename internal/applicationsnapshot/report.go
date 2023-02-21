@@ -23,19 +23,20 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/hashicorp/go-multierror"
-	"github.com/open-policy-agent/conftest/output"
+	conftestOutput "github.com/open-policy-agent/conftest/output"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
-	"github.com/sigstore/cosign/pkg/cosign"
 
 	"github.com/hacbs-contract/ec-cli/internal/format"
+	"github.com/hacbs-contract/ec-cli/internal/output"
 )
 
 type Component struct {
 	appstudioshared.ApplicationSnapshotComponent
-	Violations []output.Result     `json:"violations"`
-	Warnings   []output.Result     `json:"warnings"`
-	Success    bool                `json:"success"`
-	Signatures []cosign.Signatures `json:"signatures,omitempty"`
+	Violations   []conftestOutput.Result  `json:"violations"`
+	Warnings     []conftestOutput.Result  `json:"warnings"`
+	Success      bool                     `json:"success"`
+	SuccessCount int                      `json:"successCount"`
+	Signatures   []output.EntitySignature `json:"signatures,omitempty"`
 }
 
 type Report struct {
@@ -54,6 +55,7 @@ type summary struct {
 type componentSummary struct {
 	Name            string              `json:"name"`
 	Success         bool                `json:"success"`
+	TotalSuccesses  int                 `json:"total_successes"`
 	Violations      map[string][]string `json:"violations"`
 	Warnings        map[string][]string `json:"warnings"`
 	TotalViolations int                 `json:"total_violations"`
@@ -146,6 +148,7 @@ func (r *Report) toSummary() summary {
 		c := componentSummary{
 			TotalViolations: len(cmp.Violations),
 			TotalWarnings:   len(cmp.Warnings),
+			TotalSuccesses:  cmp.SuccessCount,
 			Success:         cmp.Success,
 			Name:            cmp.Name,
 			Violations:      condensedMsg(cmp.Violations),
@@ -158,7 +161,7 @@ func (r *Report) toSummary() summary {
 }
 
 // condensedMsg reduces repetitive error messages.
-func condensedMsg(results []output.Result) map[string][]string {
+func condensedMsg(results []conftestOutput.Result) map[string][]string {
 	maxErr := 1
 	shortNames := make(map[string][]string)
 	count := make(map[string]int)

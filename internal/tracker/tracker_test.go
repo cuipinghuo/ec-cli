@@ -31,7 +31,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 	"github.com/tektoncd/pipeline/pkg/remote/oci"
@@ -63,7 +62,7 @@ func TestTrack(t *testing.T) {
 		urls   []string
 		prune  bool
 		output string
-		input  string
+		input  []byte
 	}{
 		{
 			name: "always insert at the front",
@@ -81,6 +80,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashTwo.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: two
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -106,6 +112,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashTwo.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "2.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -119,14 +132,14 @@ func TestTrack(t *testing.T) {
 			urls: []string{
 				"registry.com/repo:two@" + sampleHashTwo.String(),
 			},
-			input: hd.Doc(
+			input: []byte(hd.Doc(
 				`---
 				pipeline-bundles:
 				  registry.com/repo:
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: one
-			`),
+			`)),
 			output: hd.Doc(
 				`---
 				pipeline-bundles:
@@ -137,6 +150,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: one
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -150,14 +170,14 @@ func TestTrack(t *testing.T) {
 			urls: []string{
 				"registry.com/two:2.0@" + sampleHashTwo.String(),
 			},
-			input: hd.Doc(`
+			input: []byte(hd.Doc(`
 				---
 				pipeline-bundles:
 				  registry.com/one:
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "1.0"
-			`),
+			`)),
 			output: hd.Doc(`
 				---
 				pipeline-bundles:
@@ -169,6 +189,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashTwo.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "2.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -182,13 +209,13 @@ func TestTrack(t *testing.T) {
 			urls: []string{
 				"registry.com/two:2.0@" + sampleHashTwo.String(),
 			},
-			input: hd.Doc(`
+			input: []byte(hd.Doc(`
 				task-bundles:
 				  registry.com/one:
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "1.0"
-			`),
+			`)),
 			output: hd.Doc(`
 				---
 				pipeline-bundles:
@@ -196,6 +223,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashTwo.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "2.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -221,6 +255,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "1.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -268,6 +309,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "1.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -293,6 +341,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "1.0"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -306,14 +361,14 @@ func TestTrack(t *testing.T) {
 			urls: []string{
 				"registry.com/empty-pipeline:1.0@" + sampleHashOne.String(),
 			},
-			input: hd.Doc(`
+			input: []byte(hd.Doc(`
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
 				      - buildah
 				      - git-clone
 				      - summary
-			`),
+			`)),
 			output: hd.Doc(`
 				---
 				pipeline-bundles:
@@ -336,14 +391,14 @@ func TestTrack(t *testing.T) {
 			urls: []string{
 				"registry.com/one:1.0@" + sampleHashOne.String(),
 			},
-			input: hd.Doc(`
+			input: []byte(hd.Doc(`
 				---
 				pipeline-bundles:
 				  registry.com/one:
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "0.9"
-			`),
+			`)),
 			output: hd.Doc(`
 				---
 				pipeline-bundles:
@@ -351,6 +406,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashOne.String() + `
 				      effective_on: "` + expectedEffectiveOn + `"
 				      tag: "0.9"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -365,7 +427,7 @@ func TestTrack(t *testing.T) {
 				"registry.com/mixed:1.0@" + sampleHashOne.String(),
 			},
 			prune: true,
-			input: hd.Doc(`
+			input: []byte(hd.Doc(`
 				---
 				pipeline-bundles:
 				  registry.com/mixed:
@@ -383,7 +445,7 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashTwo.String() + `
 				      effective_on: "` + yesterday + `"
 				      tag: "0.2"
-			`),
+			`)),
 			output: hd.Doc(`
 				---
 				pipeline-bundles:
@@ -394,6 +456,13 @@ func TestTrack(t *testing.T) {
 				    - digest: ` + sampleHashThree.String() + `
 				      effective_on: "` + yesterday + `"
 				      tag: "0.3"
+				pipeline-required-tasks:
+				  docker-build:
+				    - effective_on: "` + expectedEffectiveOn + `"
+				      tasks:
+				        - buildah
+				        - git-clone
+				        - summary
 				required-tasks:
 				  - effective_on: "` + expectedEffectiveOn + `"
 				    tasks:
@@ -415,18 +484,11 @@ func TestTrack(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			fs := afero.NewMemMapFs()
-			inputFile := ""
-			if tt.input != "" {
-				err := afero.WriteFile(fs, "input.yaml", []byte(tt.input), 0444)
-				assert.NoError(t, err)
-				inputFile = "input.yaml"
-			}
 
 			client := fakeClient{objects: testObjects, images: testImages}
 			ctx = WithClient(ctx, client)
 
-			output, err := Track(ctx, fs, tt.urls, inputFile, tt.prune)
+			output, err := Track(ctx, tt.urls, tt.input, tt.prune)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.output, string(output))
 		})
@@ -570,6 +632,7 @@ func mustCreateFakePipelineObject() runtime.Object {
 		},
 	}
 	pipeline := v1beta1.Pipeline{}
+	pipeline.SetLabels(map[string]string{"pipelines.openshift.io/runtime": "docker-build"})
 	pipeline.SetDefaults(context.Background())
 	pipeline.Spec.Tasks = []v1beta1.PipelineTask{gitCloneTask, buildahTask}
 	pipeline.Spec.Finally = []v1beta1.PipelineTask{summaryTask}
@@ -587,7 +650,7 @@ func TestFilterRequiredTasks(t *testing.T) {
 	date := time.Now().UTC().Add(time.Second * -1)
 	future := date.Add(time.Hour * 24 * 30)
 
-	requiredTasks := []commonTasksRecord{
+	requiredTasks := []tasksRecord{
 		{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
 		{EffectiveOn: date, Tasks: []string{"git-clone"}},
 	}
@@ -600,7 +663,7 @@ func TestFilterRequiredTasks(t *testing.T) {
 		{
 			name: "without prune",
 			expected: Tracker{
-				RequiredTasks: []commonTasksRecord{
+				RequiredTasks: []tasksRecord{
 					{EffectiveOn: future, Tasks: []string{"git-clone", "buildah", "clair-scan"}},
 					{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
 					{EffectiveOn: date, Tasks: []string{"git-clone"}},
@@ -611,7 +674,7 @@ func TestFilterRequiredTasks(t *testing.T) {
 		{
 			name: "with prune",
 			expected: Tracker{
-				RequiredTasks: []commonTasksRecord{
+				RequiredTasks: []tasksRecord{
 					{EffectiveOn: future, Tasks: []string{"git-clone", "buildah", "clair-scan"}},
 					{EffectiveOn: date, Tasks: []string{"git-clone", "buildah"}},
 				},
@@ -624,7 +687,7 @@ func TestFilterRequiredTasks(t *testing.T) {
 				RequiredTasks: requiredTasks,
 			}
 
-			existing.addRequiredTasksRecord(commonTasksRecord{
+			existing.addRequiredTasksRecord(tasksRecord{
 				EffectiveOn: future,
 				Tasks:       []string{"git-clone", "buildah", "clair-scan"},
 			})

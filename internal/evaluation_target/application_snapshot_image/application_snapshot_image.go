@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/afero"
 
 	"github.com/hacbs-contract/ec-cli/internal/evaluator"
+	"github.com/hacbs-contract/ec-cli/internal/output"
 	"github.com/hacbs-contract/ec-cli/internal/policy"
 	"github.com/hacbs-contract/ec-cli/internal/policy/source"
 	ece "github.com/hacbs-contract/ec-cli/pkg/error"
@@ -66,21 +67,25 @@ type ApplicationSnapshotImage struct {
 	reference    name.Reference
 	checkOpts    cosign.CheckOpts
 	attestations []oci.Signature
-	signatures   []cosign.Signatures
+	signatures   []output.EntitySignature
 	Evaluators   []evaluator.Evaluator
 }
 
 // NewApplicationSnapshotImage returns an ApplicationSnapshotImage struct with reference, checkOpts, and evaluator ready to use.
-func NewApplicationSnapshotImage(ctx context.Context, fs afero.Fs, url string, p *policy.Policy) (*ApplicationSnapshotImage, error) {
+func NewApplicationSnapshotImage(ctx context.Context, fs afero.Fs, url string, p policy.Policy) (*ApplicationSnapshotImage, error) {
+	opts, err := p.CheckOpts()
+	if err != nil {
+		return nil, err
+	}
 	a := &ApplicationSnapshotImage{
-		checkOpts: *p.CheckOpts,
+		checkOpts: *opts,
 	}
 
 	if err := a.SetImageURL(url); err != nil {
 		return nil, err
 	}
 
-	if p.CheckOpts.RekorClient != nil {
+	if opts.RekorClient != nil {
 		// By using Cosign directly the log entries are validated against the
 		// Rekor public key, the public key for Rekor can be supplied via three
 		// different means:
@@ -100,7 +105,7 @@ func NewApplicationSnapshotImage(ctx context.Context, fs afero.Fs, url string, p
 	}
 
 	// Return an evaluator for each of these
-	for _, sourceGroup := range p.EnterpriseContractPolicySpec.Sources {
+	for _, sourceGroup := range p.Spec().Sources {
 		// Todo: Make each fetch run concurrently
 		log.Debugf("Fetching policy source group '%s'", sourceGroup.Name)
 		policySources, err := fetchPolicySources(&sourceGroup)
@@ -148,7 +153,7 @@ func (a *ApplicationSnapshotImage) ValidateImageAccess(ctx context.Context) erro
 		remote.WithContext(ctx),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 	}
-	resp, err := remote.Head(a.reference, opts...)
+	resp, err := NewClient(ctx).Head(a.reference, opts...)
 	if err != nil {
 		return err
 	}
@@ -171,20 +176,20 @@ func (a *ApplicationSnapshotImage) SetImageURL(url string) error {
 
 	// Reset internal state relevant to the image
 	a.attestations = []oci.Signature{}
-	a.signatures = []cosign.Signatures{}
+	a.signatures = []output.EntitySignature{}
 
 	return nil
 }
 
 // ValidateImageSignature executes the cosign.VerifyImageSignature method on the ApplicationSnapshotImage image ref.
 func (a *ApplicationSnapshotImage) ValidateImageSignature(ctx context.Context) error {
-	_, _, err := cosign.VerifyImageSignatures(ctx, a.reference, &a.checkOpts)
+	_, _, err := NewClient(ctx).VerifyImageSignatures(ctx, a.reference, &a.checkOpts)
 	return err
 }
 
 // ValidateAttestationSignature executes the cosign.VerifyImageAttestations method
 func (a *ApplicationSnapshotImage) ValidateAttestationSignature(ctx context.Context) error {
-	attestations, _, err := cosign.VerifyImageAttestations(ctx, a.reference, &a.checkOpts)
+	attestations, _, err := NewClient(ctx).VerifyImageAttestations(ctx, a.reference, &a.checkOpts)
 	if err != nil {
 		return err
 	}
@@ -193,7 +198,7 @@ func (a *ApplicationSnapshotImage) ValidateAttestationSignature(ctx context.Cont
 	// Extract the signatures from the attestations here in order to also validate that
 	// the signatures do exist in the expected format.
 	for _, att := range attestations {
-		signatures, err := signaturesFrom(ctx, att)
+		signatures, err := entitySignatureFromAttestation(att)
 		if err != nil {
 			return err
 		}
@@ -299,7 +304,7 @@ func (a *ApplicationSnapshotImage) Attestations() []oci.Signature {
 	return a.attestations
 }
 
-func (a *ApplicationSnapshotImage) Signatures() []cosign.Signatures {
+func (a *ApplicationSnapshotImage) Signatures() []output.EntitySignature {
 	return a.signatures
 }
 
@@ -380,19 +385,4 @@ func statementFrom(ctx context.Context, att oci.Signature) ([]byte, *in_toto.Sta
 	}
 
 	return payload, &statement, nil
-}
-
-func signaturesFrom(ctx context.Context, att oci.Signature) ([]cosign.Signatures, error) {
-	rawPayload, err := att.Payload()
-	if err != nil {
-		log.Debug("Problem extracting json payload from attestation!")
-		return nil, err
-	}
-
-	var attestationPayload cosign.AttestationPayload
-	if err := json.Unmarshal(rawPayload, &attestationPayload); err != nil {
-		return nil, err
-	}
-
-	return attestationPayload.Signatures, nil
 }

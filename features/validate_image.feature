@@ -41,6 +41,7 @@ Feature: evaluate enterprise contract
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
           "violations": [],
           "warnings": [],
+          "successCount": 1,
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
@@ -81,12 +82,11 @@ Feature: evaluate enterprise contract
           "name": "Unnamed",
           "containerImage": "localhost:(\\d+)/acceptance/invalid-image-signature",
           "violations": [
-            {"msg": "no matching signatures:\ninvalid signature when validating ASN.1 encoded signature"},
-            {"msg": "no matching attestations:\nAccepted signatures do not match threshold, Found: 0, Expected 1"},
-            {"msg": "EV001: No attestation data, at github.com/hacbs-contract/ec-cli/internal/evaluation_target/application_snapshot_image/application_snapshot_image.go:47"},
-            {"msg": "no attestations available"}
+            {"msg": "No image signatures found matching the given public key. Verify the correct public key was provided, and a signature was created."},
+            {"msg": "No image attestations found matching the given public key. Verify the correct public key was provided, and one or more attestations were created."}
           ],
           "warnings": [],
+          "successCount": 0,
           "success": false
         }
       ]
@@ -115,6 +115,7 @@ Feature: evaluate enterprise contract
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
           "violations": [],
           "warnings": [],
+          "successCount": 1,
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
@@ -151,6 +152,7 @@ Feature: evaluate enterprise contract
               "msg": "Fails in 2099"
             }
           ],
+          "successCount": 0,
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
@@ -187,6 +189,7 @@ Feature: evaluate enterprise contract
             }
           ],
           "warnings": [],
+          "successCount": 0,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
@@ -239,6 +242,7 @@ Feature: evaluate enterprise contract
             }
           ],
           "success": false,
+          "successCount": 1,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
       ]
@@ -301,12 +305,38 @@ Feature: evaluate enterprise contract
               "msg": "Has a warning"
             }
           ],
+          "successCount": 1,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
       ]
     }
     """
+
+  # Demonstrate that a validation with no failures, warnings, or successes constitutes a failure as nothing was actually evaluated.
+  Scenario: no failures, warnings, or successes
+    Given a key pair named "known"
+    Given an image named "acceptance/ec-happy-day"
+    Given a valid image signature of "acceptance/ec-happy-day" image signed by the "known" key
+    Given a valid Rekor entry for image signature of "acceptance/ec-happy-day"
+    Given a valid attestation of "acceptance/ec-happy-day" signed by the "known" key
+    Given a valid Rekor entry for attestation of "acceptance/ec-happy-day"
+    Given a git repository named "happy-day-policy" with
+      | main.rego | examples/allow_all.rego |
+    Given policy configuration named "ec-policy" with specification
+    """
+    {
+      "sources": [
+        {
+          "policy": [
+            "git::http://${GITHOST}/git/happy-day-policy.git"
+          ]
+        }
+      ]
+    }
+    """
+    When ec command is run with "validate image --image ${REGISTRY}/acceptance/ec-happy-day --policy acceptance/ec-policy --public-key ${known_PUBLIC_KEY} --rekor-url ${REKOR} --strict"
+    Then the exit status should be 1
 
   # Demonstrate data sources and using the same rules with different data
   Scenario: policy and data sources
@@ -366,6 +396,43 @@ Feature: evaluate enterprise contract
           ],
           "warnings": [
           ],
+          "successCount": 0,
+          "success": false,
+          "signatures": ${ATTESTATION_SIGNATURES_JSON}
+        }
+      ]
+    }
+    """
+
+  Scenario: using attestation time as effective time
+    Given a key pair named "known"
+    Given an image named "acceptance/ec-happy-day"
+    Given a valid image signature of "acceptance/ec-happy-day" image signed by the "known" key
+    Given a valid attestation of "acceptance/ec-happy-day" signed by the "known" key, patched with
+      | [{"op": "add", "path": "/predicate/metadata", "value": {}}, {"op": "add", "path": "/predicate/metadata/buildFinishedOn", "value": "2100-01-01T00:00:00Z"}] |
+    Given a git repository named "future-deny-policy" with
+      | main.rego | examples/future_deny.rego |
+    When ec command is run with "validate image --image ${REGISTRY}/acceptance/ec-happy-day --policy {"sources":[{"policy":["git::http://${GITHOST}/git/future-deny-policy.git"]}]} --public-key ${known_PUBLIC_KEY} --effective-time attestation --strict"
+    Then the exit status should be 1
+    Then the standard output should contain
+    """
+    {
+      "success": false,
+      "key": ${known_PUBLIC_KEY_JSON},
+      "components": [
+        {
+          "name": "Unnamed",
+          "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
+          "violations": [
+            {
+              "metadata": {
+                "effective_on": "2099-01-01T00:00:00Z"
+              },
+              "msg": "Fails in 2099"
+            }
+          ],
+          "warnings": [],
+          "successCount": 0,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }

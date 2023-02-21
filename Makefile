@@ -42,7 +42,7 @@ help: ## Display this help.
 $(ALL_SUPPORTED_OS_ARCH): ## Build binaries for specific platform/architecture, e.g. make dist/ec_linux_amd64
 	@GOOS=$(word 2,$(subst _, ,$(notdir $@))); \
 	GOARCH=$(word 3,$(subst _, ,$(notdir $@))); \
-	GOOS=$${GOOS} GOARCH=$${GOARCH} go build -trimpath -ldflags="-s -w -X github.com/hacbs-contract/ec-cli/cmd.Version=$(VERSION)" -o dist/ec_$${GOOS}_$${GOARCH}; \
+	GOOS=$${GOOS} GOARCH=$${GOARCH} go build -trimpath -ldflags="-s -w -X github.com/hacbs-contract/ec-cli/cmd/version.Version=$(VERSION)" -o dist/ec_$${GOOS}_$${GOARCH}; \
 	sha256sum -b dist/ec_$${GOOS}_$${GOARCH} > dist/ec_$${GOOS}_$${GOARCH}.sha256
 
 .PHONY: dist
@@ -54,8 +54,8 @@ build: dist/ec_$(shell go env GOOS)_$(shell go env GOARCH) ## Build the ec binar
 
 .PHONY: reference-docs
 reference-docs: ## Generate reference documentation input YAML files
-	@rm -rf dist/reference
-	@go run internal/documentation/documentation.go -yaml dist/reference
+	@rm -rf dist/cli-reference
+	@go run internal/documentation/documentation.go -yaml dist/cli-reference
 
 .PHONY: test
 test: ## Run unit tests
@@ -83,7 +83,13 @@ acceptance: ## Run acceptance tests
 	@cd acceptance && go test ./...
 	@go run -modfile "$${ACCEPTANCE_WORKDIR}/tools/go.mod" github.com/wadey/gocovmerge "$${ACCEPTANCE_WORKDIR}"/coverage-acceptance*.out > "$(ROOT_DIR)/coverage-acceptance.out"
 
-LICENSE_IGNORE=-ignore 'dist/reference/*.yaml'
+# Add @focus above the feature you're hacking on to use this
+.PHONY: focus-acceptance
+focus-acceptance: ## Run acceptance tests with @focus tag
+	@$(MAKE) build
+	@cd acceptance && go test -tags=acceptance . -args -tags=@focus
+
+LICENSE_IGNORE=-ignore 'dist/cli-reference/*.yaml'
 LINT_TO_GITHUB_ANNOTATIONS='map(map(.)[])[][] as $$d | $$d.posn | split(":") as $$posn | "::warning file=\($$posn[0]),line=\($$posn[1]),col=\($$posn[2])::\($$d.message)"'
 .PHONY: lint
 lint: ## Run linter
@@ -171,20 +177,23 @@ dist-image-push: dist-image  $(subst image_,push_image_,$(ALL_SUPPORTED_IMG_OS_A
 # convention of having the image reference be tagged with "{tag}-{platform}-{arch}"
 	@for img in $(ALL_IMAGE_REFS); do TARGETOS=$$(echo $$img | sed -e 's/.*:[^-]\+-\([^-]\+\).*/\1/'); TARGETARCH=$${img/*-}; podman manifest add $(IMAGE_REPO):$(IMAGE_TAG) $(PODMAN_OPTS) $$img --os $${TARGETOS} --arch $${TARGETARCH}; done
 	@podman manifest push $(IMAGE_REPO):$(IMAGE_TAG) $(IMAGE_REPO):$(IMAGE_TAG)
+ifdef ADD_IMAGE_TAG
+	@podman manifest push $(IMAGE_REPO):$(IMAGE_TAG) $(IMAGE_REPO):$(ADD_IMAGE_TAG)
+endif
 
 .PHONY: dev
 dev: REGISTRY_PORT=5000
 dev: IMAGE_REPO=localhost:$(REGISTRY_PORT)/ec
 dev: PODMAN_OPTS=--tls-verify=false
 dev: TASK_REPO=localhost:$(REGISTRY_PORT)/ec-task-bundle
-dev: TASK:=$(shell T=$$(mktemp) && yq e ".spec.steps[].image? = \"127.0.0.1:$(REGISTRY_PORT)/ec\"" task/*/verify-enterprise-contract.yaml > "$${T}" && echo "$${T}")
+dev: TASK:=$(shell T=$$(mktemp) && yq e ".spec.steps[].image? = \"127.0.0.1:$(REGISTRY_PORT)/ec\"" tasks/verify-enterprise-contract/*/verify-enterprise-contract.yaml > "$${T}" && echo "$${T}")
 dev: push-image task-bundle ## Push the ec-cli and v-e-c Task Bundle to the kind cluster setup via hack/setup-dev-environment.sh
 	@rm "$(TASK)"
 
 TASK_TAG ?= latest
 TASK_REPO ?= quay.io/hacbs-contract/ec-task-bundle
 TASK_VERSION ?= 0.1
-TASK ?= task/$(TASK_VERSION)/verify-enterprise-contract.yaml
+TASK ?= tasks/verify-enterprise-contract/$(TASK_VERSION)/verify-enterprise-contract.yaml
 .PHONY: task-bundle
 task-bundle: ## Push the Tekton Task bundle an image repository
 	@go run -modfile tools/go.mod github.com/tektoncd/cli/cmd/tkn bundle push $(TASK_REPO):$(TASK_TAG) -f $(TASK)
