@@ -22,28 +22,31 @@ import (
 	"time"
 
 	"github.com/ghodss/yaml"
+	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
 	"github.com/hashicorp/go-multierror"
 	conftestOutput "github.com/open-policy-agent/conftest/output"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
 
 	"github.com/hacbs-contract/ec-cli/internal/format"
 	"github.com/hacbs-contract/ec-cli/internal/output"
+	"github.com/hacbs-contract/ec-cli/internal/policy"
 )
 
 type Component struct {
 	appstudioshared.ApplicationSnapshotComponent
-	Violations   []conftestOutput.Result  `json:"violations"`
-	Warnings     []conftestOutput.Result  `json:"warnings"`
-	Success      bool                     `json:"success"`
-	SuccessCount int                      `json:"successCount"`
-	Signatures   []output.EntitySignature `json:"signatures,omitempty"`
+	Violations []conftestOutput.Result  `json:"violations,omitempty"`
+	Warnings   []conftestOutput.Result  `json:"warnings,omitempty"`
+	Successes  []conftestOutput.Result  `json:"successes,omitempty"`
+	Success    bool                     `json:"success"`
+	Signatures []output.EntitySignature `json:"signatures,omitempty"`
 }
 
 type Report struct {
 	Success    bool `json:"success"`
 	created    time.Time
-	Components []Component `json:"components"`
-	Key        string      `json:"key"`
+	Components []Component                      `json:"components"`
+	Key        string                           `json:"key"`
+	Policy     ecc.EnterpriseContractPolicySpec `json:"policy"`
 }
 
 type summary struct {
@@ -55,11 +58,12 @@ type summary struct {
 type componentSummary struct {
 	Name            string              `json:"name"`
 	Success         bool                `json:"success"`
-	TotalSuccesses  int                 `json:"total_successes"`
 	Violations      map[string][]string `json:"violations"`
 	Warnings        map[string][]string `json:"warnings"`
+	Successes       map[string][]string `json:"successes"`
 	TotalViolations int                 `json:"total_violations"`
 	TotalWarnings   int                 `json:"total_warnings"`
+	TotalSuccesses  int                 `json:"total_successes"`
 }
 
 // hacbsReport represents the standardized HACBS_TEST_OUTPUT format.
@@ -85,7 +89,7 @@ const (
 
 // WriteReport returns a new instance of Report representing the state of
 // components from the snapshot.
-func NewReport(components []Component, key string) Report {
+func NewReport(components []Component, policy policy.Policy) (Report, error) {
 	success := true
 
 	// Set the report success, remains true if all components are successful
@@ -96,12 +100,18 @@ func NewReport(components []Component, key string) Report {
 		}
 	}
 
+	key, err := policy.PublicKeyPEM()
+	if err != nil {
+		return Report{}, err
+	}
+
 	return Report{
 		Success:    success,
 		Components: components,
 		created:    time.Now().UTC(),
-		Key:        key,
-	}
+		Key:        string(key),
+		Policy:     policy.Spec(),
+	}, nil
 }
 
 // WriteAll writes the report to all the given targets.
@@ -148,11 +158,12 @@ func (r *Report) toSummary() summary {
 		c := componentSummary{
 			TotalViolations: len(cmp.Violations),
 			TotalWarnings:   len(cmp.Warnings),
-			TotalSuccesses:  cmp.SuccessCount,
+			TotalSuccesses:  len(cmp.Successes),
 			Success:         cmp.Success,
 			Name:            cmp.Name,
 			Violations:      condensedMsg(cmp.Violations),
 			Warnings:        condensedMsg(cmp.Warnings),
+			Successes:       condensedMsg(cmp.Successes),
 		}
 		pr.Components = append(pr.Components, c)
 	}

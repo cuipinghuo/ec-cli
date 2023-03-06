@@ -39,13 +39,25 @@ Feature: evaluate enterprise contract
         {
           "name": "Unnamed",
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
-          "violations": [],
-          "warnings": [],
-          "successCount": 1,
+          "successes": [
+            {
+              "msg": "Pass",
+              "metadata": {
+                "code": "main.acceptor"
+              }
+            }
+          ],
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/happy-day-policy.git"] }
+        ]
+      }
     }
     """
 
@@ -85,11 +97,16 @@ Feature: evaluate enterprise contract
             {"msg": "No image signatures found matching the given public key. Verify the correct public key was provided, and a signature was created."},
             {"msg": "No image attestations found matching the given public key. Verify the correct public key was provided, and one or more attestations were created."}
           ],
-          "warnings": [],
-          "successCount": 0,
           "success": false
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${unknown_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/invalid-image-signature.git"] }
+        ]
+      }
     }
     """
 
@@ -113,13 +130,25 @@ Feature: evaluate enterprise contract
         {
           "name": "Unnamed",
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
-          "violations": [],
-          "warnings": [],
-          "successCount": 1,
+          "successes": [
+            {
+              "msg": "Pass",
+              "metadata": {
+                "code": "main.acceptor"
+              }
+            }
+          ],
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/happy-day-policy.git"] }
+        ]
+      }
     }
     """
 
@@ -143,7 +172,6 @@ Feature: evaluate enterprise contract
         {
           "name": "Unnamed",
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
-          "violations": [],
           "warnings": [
             {
               "metadata": {
@@ -152,11 +180,17 @@ Feature: evaluate enterprise contract
               "msg": "Fails in 2099"
             }
           ],
-          "successCount": 0,
           "success": true,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/future-deny-policy.git"] }
+        ]
+      }
     }
     """
 
@@ -188,12 +222,17 @@ Feature: evaluate enterprise contract
               "msg": "Fails in 2099"
             }
           ],
-          "warnings": [],
-          "successCount": 0,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/future-deny-policy.git"] }
+        ]
+      }
     }
     """
 
@@ -233,7 +272,11 @@ Feature: evaluate enterprise contract
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
           "violations": [
             {
-              "msg": "Fails always"
+              "msg": "Fails always",
+              "metadata": {
+                "code": "main.rejector",
+                "effective_on": "2022-01-01T00:00:00Z"
+              }
             }
           ],
           "warnings": [
@@ -241,11 +284,27 @@ Feature: evaluate enterprise contract
               "msg": "Has a warning"
             }
           ],
+          "successes": [
+            {
+              "msg": "Pass",
+              "metadata": {
+                "code": "main.acceptor"
+              }
+            }
+          ],
           "success": false,
-          "successCount": 1,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/repository1.git"] },
+          { "policy": ["git::http://${GITHOST}/git/repository2.git"] },
+          { "policy": ["git::http://${GITHOST}/git/repository3.git"] }
+        ]
+      }
     }
     """
 
@@ -297,7 +356,11 @@ Feature: evaluate enterprise contract
           "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
           "violations": [
             {
-              "msg": "Fails always"
+              "msg": "Fails always",
+              "metadata": {
+                "code": "main.rejector",
+                "effective_on": "2022-01-01T00:00:00Z"
+              }
             }
           ],
           "warnings": [
@@ -305,11 +368,29 @@ Feature: evaluate enterprise contract
               "msg": "Has a warning"
             }
           ],
-          "successCount": 1,
+          "successes": [
+            {
+              "msg": "Pass",
+              "metadata": {
+                "code": "main.acceptor"
+              }
+            }
+          ],
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          {"policy": [
+            "git::http://${GITHOST}/git/repository1.git",
+            "git::http://${GITHOST}/git/repository2.git",
+            "git::http://${GITHOST}/git/repository3.git"
+          ]}
+        ]
+      }
     }
     """
 
@@ -394,13 +475,32 @@ Feature: evaluate enterprise contract
               "msg": "Failure due to spider attack"
             }
           ],
-          "warnings": [
-          ],
-          "successCount": 0,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
-      ]
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          {
+            "policy": [
+              "git::http://${GITHOST}/git/banana_check.git"
+            ],
+            "data": [
+              "git::http://${GITHOST}/git/banana_data_1.git"
+            ]
+          },
+          {
+            "policy": [
+              "git::http://${GITHOST}/git/banana_check.git"
+            ],
+            "data": [
+              "git::http://${GITHOST}/git/banana_data_2.git"
+            ]
+          }
+        ]
+      }
     }
     """
 
@@ -431,11 +531,153 @@ Feature: evaluate enterprise contract
               "msg": "Fails in 2099"
             }
           ],
-          "warnings": [],
-          "successCount": 0,
           "success": false,
           "signatures": ${ATTESTATION_SIGNATURES_JSON}
         }
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/future-deny-policy.git"] }
+        ]
+      }
+    }
+    """
+
+  Scenario: detailed failures output
+    Given a key pair named "known"
+    Given an image named "acceptance/image"
+    Given a valid image signature of "acceptance/image" image signed by the "known" key
+    Given a valid attestation of "acceptance/image" signed by the "known" key
+    Given a git repository named "happy-day-policy" with
+      | happy_day.rego | examples/happy_day.rego      |
+      | reject.rego    | examples/reject.rego         |
+    Given policy configuration named "ec-policy" with specification
+    """
+    {
+      "sources": [
+        {
+          "policy": [
+            "git::http://${GITHOST}/git/happy-day-policy.git"
+          ]
+        }
       ]
+    }
+    """
+    When ec command is run with "validate image --image ${REGISTRY}/acceptance/image --policy acceptance/ec-policy --public-key ${known_PUBLIC_KEY} --info --strict"
+    Then the exit status should be 1
+    Then the standard output should contain
+    """
+    {
+      "components": [
+        {
+          "containerImage": "localhost:(\\d+)/acceptance/image",
+          "name": "Unnamed",
+          "signatures": ${ATTESTATION_SIGNATURES_JSON},
+          "success": false,
+          "violations": [
+            {
+              "msg": "Fails always",
+              "metadata": {
+                "title": "Reject rule",
+                "description": "This rule will always fail",
+                "code": "main.rejector",
+                "collections": ["A"],
+                "effective_on": "2022-01-01T00:00:00Z"
+              }
+            }
+          ],
+          "successes": [
+            {
+              "msg": "Pass",
+              "metadata": {
+                "title": "Allow rule",
+                "description": "This rule will never fail",
+                "code": "main.acceptor",
+                "collections": ["A"]
+              }
+            }
+          ]
+        }
+      ],
+      "policy": {
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "sources": [
+          { "policy": ["git::http://${GITHOST}/git/happy-day-policy.git"] }
+        ]
+      },
+      "key": ${known_PUBLIC_KEY_JSON},
+      "success": false
+    }
+    """
+
+  Scenario: policy rule filtering
+    Given a key pair named "known"
+    Given an image named "acceptance/ec-happy-day"
+    Given a valid image signature of "acceptance/ec-happy-day" image signed by the "known" key
+    Given a valid Rekor entry for image signature of "acceptance/ec-happy-day"
+    Given a valid attestation of "acceptance/ec-happy-day" signed by the "known" key
+    Given a valid Rekor entry for attestation of "acceptance/ec-happy-day"
+    Given a git repository named "happy-day-policy" with
+      | filtering.rego | examples/filtering.rego |
+    Given policy configuration named "ec-policy" with specification
+    """
+    {
+      "configuration": {
+        "collections": ["stamps"],
+        "include": ["filtering.always_pass"],
+        "exclude": ["filtering.always_fail", "filtering.always_fail_with_collection"]
+      },
+      "sources": [
+        {
+          "policy": [
+            "git::http://${GITHOST}/git/happy-day-policy.git"
+          ]
+        }
+      ]
+    }
+    """
+    When ec command is run with "validate image --image ${REGISTRY}/acceptance/ec-happy-day --policy acceptance/ec-policy --public-key ${known_PUBLIC_KEY} --rekor-url ${REKOR} --strict"
+    Then the exit status should be 0
+    Then the standard output should contain
+    """
+    {
+      "success": true,
+      "key": ${known_PUBLIC_KEY_JSON},
+      "components": [
+        {
+          "name": "Unnamed",
+          "containerImage": "localhost:(\\d+)/acceptance/ec-happy-day",
+          "success": true,
+          "signatures": ${ATTESTATION_SIGNATURES_JSON},
+          "successes": [
+            {"metadata": {"code": "filtering.always_pass_with_collection"}, "msg": "Pass"},
+            {"metadata": {"code": "filtering.always_pass"}, "msg": "Pass"}
+          ]
+        }
+      ],
+      "policy": {
+        "configuration": {
+          "collections": [
+            "stamps"
+          ],
+          "exclude": [
+            "filtering.always_fail",
+            "filtering.always_fail_with_collection"
+          ],
+          "include": [
+            "filtering.always_pass"
+          ]
+        },
+        "publicKey": ${known_PUBLIC_KEY_JSON},
+        "rekorUrl": "${REKOR}",
+        "sources": [
+          {
+            "policy": [
+              "git::http://${GITHOST}/git/happy-day-policy.git"
+            ]
+          }
+        ]
+      }
     }
     """

@@ -19,119 +19,70 @@
 package applicationsnapshot
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	hd "github.com/MakeNowJust/heredoc"
 	"github.com/open-policy-agent/conftest/output"
 	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hacbs-contract/ec-cli/internal/format"
+	"github.com/hacbs-contract/ec-cli/internal/policy"
 )
 
 //go:embed test_snapshot.json
 var testSnapshot string
 
 func Test_ReportJson(t *testing.T) {
-	var snapshot *appstudioshared.ApplicationSnapshotSpec
+	var snapshot appstudioshared.ApplicationSnapshotSpec
 	err := json.Unmarshal([]byte(testSnapshot), &snapshot)
 	assert.NoError(t, err)
 
-	expected := `
-    {
-      "success": true,
-	  "key": "my-public-key",
-      "components": [
-        {
-          "name": "spam",
-          "containerImage": "quay.io/caf/spam@sha256:123…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
-        },
-        {
-          "name": "bacon",
-          "containerImage": "quay.io/caf/bacon@sha256:234…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
-        },
-        {
-          "name": "eggs",
-          "containerImage": "quay.io/caf/eggs@sha256:345…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
-        }
-      ]
-    }
-  `
-	var components []Component
-	for _, component := range snapshot.Components {
-		c := Component{
-			Violations: []output.Result{},
-			Success:    true,
-		}
-		c.Name, c.ContainerImage = component.Name, component.ContainerImage
-		components = append(components, c)
-	}
-
-	report := NewReport(components, "my-public-key")
-	reportJson, err := report.toFormat(JSON)
-	assert.NoError(t, err)
-	assert.JSONEq(t, expected, string(reportJson))
-	assert.True(t, report.Success)
-
-	expected = `
+	expected := fmt.Sprintf(`
     {
       "success": false,
-	  "key": "my-public-key",
+	  "key": "%s",
       "components": [
         {
           "name": "spam",
           "containerImage": "quay.io/caf/spam@sha256:123…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
+          "violations": [{"msg": "violation1"}],
+          "warnings": [{"msg": "warning1"}],
+		  "successes": [{"msg": "success1"}],
+          "success": false
         },
         {
           "name": "bacon",
           "containerImage": "quay.io/caf/bacon@sha256:234…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
+          "violations": [{"msg": "violation2"}],
+          "success": false
         },
         {
-          "name": "eggs",
-          "containerImage": "quay.io/caf/eggs@sha256:345…",
-          "violations": [],
-          "warnings": null,
-          "success": true,
-		  "successCount": 0
-        },
-        {
-          "name": "",
-          "containerImage": "",
-          "violations": null,
-          "warnings": null,
-          "success": false,
-		  "successCount": 0
+			"name": "eggs",
+			"containerImage": "quay.io/caf/eggs@sha256:345…",
+			"successes": [{"msg": "success3"}],
+			"success": true
         }
-      ]
+      ],
+	  "policy": {
+		"publicKey": "%s"
+	  }
     }
-  `
-	components = append(components, Component{Success: false})
-	report = NewReport(components, "my-public-key")
-	reportJson, err = report.toFormat(JSON)
+  	`, testPublicKeyCompact, testPublicKeyCompact)
+
+	components := testComponentsFor(snapshot)
+
+	ctx := context.Background()
+	report, err := NewReport(components, createTestPolicy(t, ctx))
+	assert.NoError(t, err)
+	reportJson, err := report.toFormat(JSON)
 	assert.NoError(t, err)
 	assert.JSONEq(t, expected, string(reportJson))
 	assert.False(t, report.Success)
@@ -142,80 +93,39 @@ func Test_ReportYaml(t *testing.T) {
 	err := json.Unmarshal([]byte(testSnapshot), &snapshot)
 	assert.NoError(t, err)
 
-	expected := `
-success: true
-key: my-public-key
-components:
-  - name: spam
-    containerImage: quay.io/caf/spam@sha256:123…
-    violations: []
-    warnings: null
-    success: true
-    successCount: 5
-  - name: bacon
-    containerImage: quay.io/caf/bacon@sha256:234…
-    violations: []
-    warnings: null
-    success: true
-    successCount: 5
-  - name: eggs
-    containerImage: quay.io/caf/eggs@sha256:345…
-    violations: []
-    warnings: null
-    success: true
-    successCount: 5
-`
-
-	var components []Component
-	for _, component := range snapshot.Components {
-		c := Component{
-			Violations:   []output.Result{},
-			Success:      true,
-			SuccessCount: 5,
-		}
-		c.Name, c.ContainerImage = component.Name, component.ContainerImage
-		components = append(components, c)
-	}
-
-	report := NewReport(components, "my-public-key")
-	reportYaml, err := report.toFormat(YAML)
-	assert.NoError(t, err)
-	assert.YAMLEq(t, expected, string(reportYaml))
-	assert.True(t, report.Success)
-
-	expected = `
+	expected := fmt.Sprintf(`
 success: false
-key: my-public-key
+key: "%s"
 components:
   - name: spam
     containerImage: quay.io/caf/spam@sha256:123…
-    violations: []
-    warnings: null
-    success: true
-    successCount: 5
+    violations:
+      - msg: violation1
+    warnings:
+      - msg: warning1
+    successes:
+      - msg: success1
+    success: false
   - name: bacon
     containerImage: quay.io/caf/bacon@sha256:234…
-    violations: []
-    warnings: null
-    success: true
-    successCount: 5
+    violations:
+      - msg: violation2
+    success: false
   - name: eggs
     containerImage: quay.io/caf/eggs@sha256:345…
-    violations: []
-    warnings: null
+    successes:
+      - msg: success3
     success: true
-    successCount: 5
-  - name: ""
-    containerImage: ""
-    violations: null
-    warnings: null
-    success: false
-    successCount: 0
+policy:
+  publicKey: "%s"
+`, testPublicKeyCompact, testPublicKeyCompact)
 
-`
-	components = append(components, Component{Success: false})
-	report = NewReport(components, "my-public-key")
-	reportYaml, err = report.toFormat(YAML)
+	components := testComponentsFor(*snapshot)
+
+	ctx := context.Background()
+	report, err := NewReport(components, createTestPolicy(t, ctx))
+	assert.NoError(t, err)
+	reportYaml, err := report.toFormat(YAML)
 	assert.NoError(t, err)
 	assert.YAMLEq(t, expected, string(reportYaml))
 	assert.False(t, report.Success)
@@ -246,8 +156,7 @@ func Test_ReportSummary(t *testing.T) {
 						},
 					},
 				},
-				SuccessCount: 0,
-				Success:      false,
+				Success: false,
 			},
 			summary{
 				Components: []componentSummary{
@@ -258,6 +167,7 @@ func Test_ReportSummary(t *testing.T) {
 						Warnings: map[string][]string{
 							"short_name": {"short report"},
 						},
+						Successes:       map[string][]string{},
 						TotalViolations: 1,
 						TotalSuccesses:  0,
 						TotalWarnings:   1,
@@ -266,7 +176,7 @@ func Test_ReportSummary(t *testing.T) {
 					},
 				},
 				Success: false,
-				Key:     "my-public-key",
+				Key:     testPublicKey,
 			},
 		},
 		{
@@ -282,14 +192,14 @@ func Test_ReportSummary(t *testing.T) {
 						Message: "short report",
 					},
 				},
-				SuccessCount: 0,
-				Success:      false,
+				Success: false,
 			},
 			summary{
 				Components: []componentSummary{
 					{
 						Violations:      map[string][]string{},
 						Warnings:        map[string][]string{},
+						Successes:       map[string][]string{},
 						TotalViolations: 1,
 						TotalWarnings:   1,
 						Success:         false,
@@ -298,7 +208,7 @@ func Test_ReportSummary(t *testing.T) {
 					},
 				},
 				Success: false,
-				Key:     "my-public-key",
+				Key:     testPublicKey,
 			},
 		},
 		{
@@ -332,8 +242,7 @@ func Test_ReportSummary(t *testing.T) {
 						},
 					},
 				},
-				SuccessCount: 0,
-				Success:      false,
+				Success: false,
 			},
 			summary{
 				Components: []componentSummary{
@@ -344,6 +253,7 @@ func Test_ReportSummary(t *testing.T) {
 						Warnings: map[string][]string{
 							"short_name": {"short report", "There are 1 more \"short_name\" messages"},
 						},
+						Successes:       map[string][]string{},
 						TotalViolations: 2,
 						TotalWarnings:   2,
 						Success:         false,
@@ -352,14 +262,62 @@ func Test_ReportSummary(t *testing.T) {
 					},
 				},
 				Success: false,
-				Key:     "my-public-key",
+				Key:     testPublicKey,
+			},
+		},
+		{
+			"with successes",
+			Component{
+				Violations: []output.Result{
+					{
+						Message: "violation",
+						Metadata: map[string]interface{}{
+							"code": "violation",
+						},
+					},
+				},
+				Warnings: []output.Result{
+					{
+						Message: "warning",
+						Metadata: map[string]interface{}{
+							"code": "warning",
+						},
+					},
+				},
+				Successes: []output.Result{
+					{
+						Message: "success",
+						Metadata: map[string]interface{}{
+							"code": "success",
+						},
+					},
+				},
+				Success: false,
+			},
+			summary{
+				Components: []componentSummary{
+					{
+						Violations:      map[string][]string{"violation": {"violation"}},
+						Warnings:        map[string][]string{"warning": {"warning"}},
+						Successes:       map[string][]string{"success": {"success"}},
+						TotalViolations: 1,
+						TotalWarnings:   1,
+						TotalSuccesses:  1,
+						Success:         false,
+						Name:            "",
+					},
+				},
+				Success: false,
+				Key:     testPublicKey,
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("NewReport=%s", tc.name), func(t *testing.T) {
-			report := NewReport([]Component{tc.input}, "my-public-key")
+			ctx := context.Background()
+			report, err := NewReport([]Component{tc.input}, createTestPolicy(t, ctx))
+			assert.NoError(t, err)
 			assert.Equal(t, tc.want, report.toSummary())
 		})
 	}
@@ -475,7 +433,9 @@ func Test_ReportHACBS(t *testing.T) {
 			defaultWriter, err := fs.Create("default")
 			assert.NoError(t, err)
 
-			report := NewReport(c.components, "my-public-key")
+			ctx := context.Background()
+			report, err := NewReport(c.components, createTestPolicy(t, ctx))
+			assert.NoError(t, err)
 			assert.False(t, report.created.IsZero())
 			assert.Equal(t, c.success, report.Success)
 
@@ -493,4 +453,62 @@ func Test_ReportHACBS(t *testing.T) {
 			assert.JSONEq(t, c.expected, string(defaultReportText))
 		})
 	}
+}
+
+func testComponentsFor(snapshot appstudioshared.ApplicationSnapshotSpec) []Component {
+	components := []Component{
+		{
+			ApplicationSnapshotComponent: snapshot.Components[0],
+			Violations: []output.Result{
+				{
+					Message: "violation1",
+				},
+			},
+			Warnings: []output.Result{
+				{
+					Message: "warning1",
+				},
+			},
+			Successes: []output.Result{
+				{
+					Message: "success1",
+				},
+			},
+			Success: false,
+		},
+		{
+			ApplicationSnapshotComponent: snapshot.Components[1],
+			Violations: []output.Result{
+				{
+					Message: "violation2",
+				},
+			},
+			Success: false,
+		},
+		{
+			ApplicationSnapshotComponent: snapshot.Components[2],
+			Successes: []output.Result{
+				{
+					Message: "success3",
+				},
+			},
+			Success: true,
+		},
+	}
+	return components
+}
+
+var testPublicKey = hd.Doc(`
+	-----BEGIN PUBLIC KEY-----
+	MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEd1WDOudb86dW6Ume+d0B8SILNdsW
+	vn2vZNA6+5u53oaJRFDi15iOqDPlxMWbvwN1C0r8OpIvIQeOAWEjHqfx/w==
+	-----END PUBLIC KEY-----
+	`)
+
+var testPublicKeyCompact = strings.ReplaceAll(testPublicKey, "\n", "\\n")
+
+func createTestPolicy(t *testing.T, ctx context.Context) policy.Policy {
+	p, err := policy.NewPolicy(ctx, "", "", testPublicKey, policy.Now)
+	assert.NoError(t, err)
+	return p
 }

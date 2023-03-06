@@ -27,10 +27,13 @@ import (
 
 	"github.com/open-policy-agent/conftest/output"
 	"github.com/open-policy-agent/conftest/runner"
+	"github.com/open-policy-agent/opa/ast"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"golang.org/x/exp/slices"
 
+	"github.com/hacbs-contract/ec-cli/internal/opa"
+	"github.com/hacbs-contract/ec-cli/internal/opa/rule"
 	"github.com/hacbs-contract/ec-cli/internal/policy"
 	"github.com/hacbs-contract/ec-cli/internal/policy/source"
 	"github.com/hacbs-contract/ec-cli/internal/utils"
@@ -40,9 +43,36 @@ type contextKey string
 
 const runnerKey contextKey = "ec.evaluator.runner"
 
+type CheckResult struct {
+	output.CheckResult
+	Successes []output.Result `json:"successes,omitempty"`
+}
+
+type CheckResults []CheckResult
+
+func (c CheckResults) ToConftestResults() []output.CheckResult {
+	results := make([]output.CheckResult, 0, len(c))
+
+	for _, r := range c {
+		results = append(results, r.CheckResult)
+	}
+
+	return results
+}
+
 type testRunner interface {
 	Run(context.Context, []string) ([]output.CheckResult, error)
 }
+
+const (
+	effectiveOnFormat   = "2006-01-02T15:04:05Z"
+	metadataCode        = "code"
+	metadataCollections = "collections"
+	metadataDescription = "description"
+	metadataEffectiveOn = "effective_on"
+	metadataTerm        = "term"
+	metadataTitle       = "title"
+)
 
 // ConftestEvaluator represents a structure which can be used to evaluate targets
 type conftestEvaluator struct {
@@ -93,16 +123,49 @@ func (c conftestEvaluator) Destroy() {
 	}
 }
 
-func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]output.CheckResult, error) {
-	results := make([]output.CheckResult, 0, 10)
+type policyRules map[string]rule.Info
+
+func (r *policyRules) collect(a *ast.AnnotationsRef) {
+	if a.Annotations == nil {
+		return
+	}
+
+	info := rule.RuleInfo(a)
+
+	if info.ShortName == "" {
+		// no short name matching with the code from Metadata will not be
+		// deterministic
+		return
+	}
+
+	code := info.Code
+	(*r)[code] = info
+}
+
+func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (CheckResults, error) {
+	results := make([]CheckResult, 0, 10)
 
 	// Download all sources
+	rules := policyRules{}
 	for _, s := range c.policySources {
-		_, err := s.GetPolicy(ctx, c.workDir, false)
+		dir, err := s.GetPolicy(ctx, c.workDir, false)
 		if err != nil {
 			log.Debugf("Unable to download source from %s!", s.PolicyUrl())
 			// TODO do we want to download other policies instead of erroring out?
 			return nil, err
+		}
+
+		fs := utils.FS(ctx)
+		annotations, err := opa.InspectDir(fs, dir)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, a := range annotations {
+			if a.Annotations == nil {
+				continue
+			}
+			rules.collect(a)
 		}
 	}
 
@@ -130,8 +193,11 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 	effectiveTime := c.policy.EffectiveTime()
 
 	for i, result := range runResults {
+		log.Debugf("Evaluation result at %d: %#v", i, result)
 		warnings := []output.Result{}
 		failures := []output.Result{}
+
+		addMetadata(&result, rules)
 
 		for _, warning := range result.Warnings {
 			if !c.isResultIncluded(warning) {
@@ -157,10 +223,40 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 		result.Warnings = warnings
 		result.Failures = failures
 
-		runResults[i] = result
+		results = append(results, CheckResult{CheckResult: result})
 	}
 
-	results = append(results, runResults...)
+	// set successes, these are not provided in the Conftest results, so we
+	// reconstruct these from the parsed rules, any rule that hasn't been
+	// touched by adding metadata must have succeeded
+
+	// TODO see about multiple results, somehow; using results[0] for now
+	if l := len(rules); l > 0 {
+		results[0].Successes = make([]output.Result, 0, l)
+	}
+
+	for code, rule := range rules {
+		result := output.Result{
+			Message: "Pass",
+			Metadata: map[string]interface{}{
+				"code": code,
+			},
+		}
+
+		if rule.Title != "" {
+			result.Metadata["title"] = rule.Title
+		}
+
+		if rule.Description != "" {
+			result.Metadata["description"] = rule.Description
+		}
+
+		if len(rule.Collections) > 0 {
+			result.Metadata["collections"] = rule.Collections
+		}
+
+		results[0].Successes = append(results[0].Successes, result)
+	}
 
 	// Evaluate total successes, warnings, and failures. If all are 0, then
 	// we have effectively failed, because no tests were actually ran due to
@@ -168,7 +264,10 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 	var total int
 
 	for _, res := range results {
-		total += res.Successes
+		// we could use len(res.Successes), but that is not correct as some of
+		// the successes might not follow the conventions used, i.e. have
+		// short_name annotation, so we use the number calculated by Conftest
+		total += res.CheckResult.Successes
 		total += len(res.Warnings)
 		total += len(res.Failures)
 	}
@@ -176,7 +275,62 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) ([]out
 		log.Error("no successes, warnings, or failures, check input")
 		return nil, fmt.Errorf("no successes, warnings, or failures, check input")
 	}
+
 	return results, nil
+}
+
+func addMetadata(result *output.CheckResult, rules policyRules) {
+	addMetadataToResults(result.Exceptions, rules)
+	addMetadataToResults(result.Failures, rules)
+	addMetadataToResults(result.Skipped, rules)
+	addMetadataToResults(result.Warnings, rules)
+}
+
+func addMetadataToResults(results []output.Result, rules policyRules) {
+	for i := range results {
+		r := &results[i]
+		if r.Metadata == nil {
+			continue
+		}
+
+		// normalize collection to []string
+		if v, ok := r.Metadata[metadataCollections]; ok {
+			switch vals := v.(type) {
+			case []any:
+				col := make([]string, 0, len(vals))
+				for _, c := range vals {
+					col = append(col, fmt.Sprint(c))
+				}
+				r.Metadata[metadataCollections] = col
+			case []string:
+				// all good, mainly left for documentation of the normalization
+			default:
+				// remove unsupported collections attribute
+				delete(r.Metadata, metadataCollections)
+			}
+		}
+
+		code, ok := r.Metadata[metadataCode].(string)
+		if !ok {
+			continue
+		}
+
+		rule, ok := (rules)[code]
+		if !ok {
+			continue
+		}
+		delete((rules), code)
+
+		if rule.Title != "" {
+			r.Metadata[metadataTitle] = rule.Title
+		}
+		if rule.Description != "" {
+			r.Metadata[metadataDescription] = rule.Description
+		}
+		if len(rule.Collections) > 0 {
+			r.Metadata[metadataCollections] = rule.Collections
+		}
+	}
 }
 
 // createConfigJSON creates the config.json file with the provided configuration
@@ -286,26 +440,21 @@ func (c *conftestEvaluator) createDataDirectory(ctx context.Context) error {
 	return nil
 }
 
-const (
-	effectiveOnKey    = "effective_on"
-	effectiveOnFormat = "2006-01-02T15:04:05Z"
-)
-
 // isResultEffective returns whether or not the given result's effective date is before now.
 // Failure to determine the effective date is reported as the result being effective.
 func isResultEffective(failure output.Result, now time.Time) bool {
-	raw, ok := failure.Metadata[effectiveOnKey]
+	raw, ok := failure.Metadata[metadataEffectiveOn]
 	if !ok {
 		return true
 	}
 	str, ok := raw.(string)
 	if !ok {
-		log.Warnf("Ignoring non-string %q value %#v", effectiveOnKey, raw)
+		log.Warnf("Ignoring non-string %q value %#v", metadataEffectiveOn, raw)
 		return true
 	}
 	effectiveOn, err := time.Parse(effectiveOnFormat, str)
 	if err != nil {
-		log.Warnf("Invalid %q value %q", effectiveOnKey, failure.Metadata)
+		log.Warnf("Invalid %q value %q", metadataEffectiveOn, failure.Metadata)
 		return true
 	}
 	return effectiveOn.Before(now)
@@ -358,8 +507,8 @@ func hasAnyMatch(needles, haystack []string) bool {
 
 // makeMatchers returns the possible matching strings for the result.
 func makeMatchers(result output.Result) []string {
-	code := extractStringFromMetadata(result, "code")
-	term := extractStringFromMetadata(result, "term")
+	code := extractStringFromMetadata(result, metadataCode)
+	term := extractStringFromMetadata(result, metadataTerm)
 	parts := strings.Split(code, ".")
 	var pkg string
 	if len(parts) >= 2 {
@@ -388,13 +537,11 @@ func makeMatchers(result output.Result) []string {
 // extractCollections returns the collections encoded in the result metadata.
 func extractCollections(result output.Result) []string {
 	var collections []string
-	if maybeInterfaces, exists := result.Metadata["collections"]; exists {
-		if interfaces, ok := maybeInterfaces.([]interface{}); ok {
-			for _, maybeCollection := range interfaces {
-				if collection, ok := maybeCollection.(string); ok {
-					collections = append(collections, collection)
-				}
-			}
+	if maybeCollections, exists := result.Metadata[metadataCollections]; exists {
+		if ruleCollections, ok := maybeCollections.([]string); ok {
+			collections = append(collections, ruleCollections...)
+		} else {
+			panic(fmt.Sprintf("Unsupported collections set in Metadata, expecting []string got: %v", maybeCollections))
 		}
 	}
 	return collections

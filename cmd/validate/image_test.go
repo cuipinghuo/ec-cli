@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hacbs-contract/ec-cli/internal/applicationsnapshot"
+	"github.com/hacbs-contract/ec-cli/internal/evaluator"
 	"github.com/hacbs-contract/ec-cli/internal/output"
 	"github.com/hacbs-contract/ec-cli/internal/policy"
 	"github.com/hacbs-contract/ec-cli/internal/utils"
@@ -160,7 +161,7 @@ func Test_determineInputSpec(t *testing.T) {
 }
 
 func Test_ValidateImageCommand(t *testing.T) {
-	validate := func(_ context.Context, url string, _ policy.Policy) (*output.Output, error) {
+	validate := func(_ context.Context, url string, _ policy.Policy, _ bool) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: true,
@@ -174,11 +175,21 @@ func Test_ValidateImageCommand(t *testing.T) {
 			AttestationSyntaxCheck: output.VerificationStatus{
 				Passed: true,
 			},
-			PolicyCheck: []conftestOutput.CheckResult{
+			PolicyCheck: evaluator.CheckResults{
 				{
-					FileName:  "test.json",
-					Namespace: "test.main",
-					Successes: 14,
+					CheckResult: conftestOutput.CheckResult{
+						FileName:  "test.json",
+						Namespace: "test.main",
+						Successes: 1,
+					},
+					Successes: []conftestOutput.Result{
+						{
+							Message: "Pass",
+							Metadata: map[string]interface{}{
+								"code": "policy.nice",
+							},
+						},
+					},
 				},
 			},
 			ImageURL: url,
@@ -209,13 +220,16 @@ func Test_ValidateImageCommand(t *testing.T) {
 		  {
 			"name": "Unnamed",
 			"containerImage": "registry/image:tag",
-			"violations": [],
-			"warnings": [],
-			"success": true,
-			"successCount": 14
+			"successes": [
+				{"msg": "Pass", "metadata": {"code": "policy.nice"}}
+			],
+			"success": true
 		  }
-		]
-	  }`, mockPublicKey), out.String())
+		],
+		"policy": {
+			"publicKey": "%s"
+		}
+	  }`, mockPublicKey, mockPublicKey), out.String())
 }
 
 func Test_ValidateErrorCommand(t *testing.T) {
@@ -280,7 +294,7 @@ func Test_ValidateErrorCommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			validate := func(context.Context, string, policy.Policy) (*output.Output, error) {
+			validate := func(context.Context, string, policy.Policy, bool) (*output.Output, error) {
 				return nil, errors.New("expected")
 			}
 
@@ -303,7 +317,7 @@ func Test_ValidateErrorCommand(t *testing.T) {
 }
 
 func Test_FailureImageAccessibility(t *testing.T) {
-	validate := func(_ context.Context, url string, _ policy.Policy) (*output.Output, error) {
+	validate := func(_ context.Context, url string, _ policy.Policy, _ bool) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: false,
@@ -349,16 +363,17 @@ func Test_FailureImageAccessibility(t *testing.T) {
 			  {"msg": "image ref not accessible. HEAD registry/image:tag: unexpected status code 404 Not Found (HEAD responses have no body, use GET for details)"},
 			  {"msg": "skipped due to inaccessible image ref"}
 			],
-			"warnings": [],
-			"success": false,
-			"successCount": 0
+			"success": false
 		  }
-		]
-	  }`, mockPublicKey), out.String())
+		],
+		"policy": {
+			"publicKey": "%s"
+		}
+	  }`, mockPublicKey, mockPublicKey), out.String())
 }
 
 func Test_FailureOutput(t *testing.T) {
-	validate := func(_ context.Context, url string, _ policy.Policy) (*output.Output, error) {
+	validate := func(_ context.Context, url string, _ policy.Policy, _ bool) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: false,
@@ -402,16 +417,17 @@ func Test_FailureOutput(t *testing.T) {
 			  {"msg": "failed image signature check"},
 			  {"msg": "failed attestation signature check"}
 			],
-			"warnings": [],
-			"success": false,
-			"successCount": 0
+			"success": false
 		  }
-		]
-	  }`, mockPublicKey), out.String())
+		],
+		"policy": {
+			"publicKey": "%s"
+		}
+	  }`, mockPublicKey, mockPublicKey), out.String())
 }
 
 func Test_WarningOutput(t *testing.T) {
-	validate := func(_ context.Context, url string, _ policy.Policy) (*output.Output, error) {
+	validate := func(_ context.Context, url string, _ policy.Policy, _ bool) (*output.Output, error) {
 		return &output.Output{
 			ImageSignatureCheck: output.VerificationStatus{
 				Passed: true,
@@ -422,11 +438,13 @@ func Test_WarningOutput(t *testing.T) {
 			AttestationSignatureCheck: output.VerificationStatus{
 				Passed: true,
 			},
-			PolicyCheck: []conftestOutput.CheckResult{
+			PolicyCheck: evaluator.CheckResults{
 				{
-					Warnings: []conftestOutput.Result{
-						{Message: "warning for policy check 1"},
-						{Message: "warning for policy check 2"},
+					CheckResult: conftestOutput.CheckResult{
+						Warnings: []conftestOutput.Result{
+							{Message: "warning for policy check 1"},
+							{Message: "warning for policy check 2"},
+						},
 					},
 				},
 			},
@@ -457,14 +475,15 @@ func Test_WarningOutput(t *testing.T) {
 		  {
 			"name": "Unnamed",
 			"containerImage": "registry/image:tag",
-			"violations": [],
 			"warnings": [
 				{"msg": "warning for policy check 1"},
 				{"msg": "warning for policy check 2"}
 			],
-			"success": true,
-			"successCount": 0
+			"success": true
 		  }
-		]
-	  }`, mockPublicKey), out.String())
+		],
+		"policy": {
+			"publicKey": "%s"
+		}
+	  }`, mockPublicKey, mockPublicKey), out.String())
 }

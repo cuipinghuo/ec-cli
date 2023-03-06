@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package pipeline
+package definition
 
 import (
 	"context"
@@ -22,11 +22,11 @@ import (
 	"fmt"
 	"testing"
 
-	conftestout "github.com/open-policy-agent/conftest/output"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/hacbs-contract/ec-cli/internal/evaluation_target/pipeline_definition_file"
+	"github.com/hacbs-contract/ec-cli/internal/evaluation_target/definition"
+	"github.com/hacbs-contract/ec-cli/internal/evaluator"
 	"github.com/hacbs-contract/ec-cli/internal/output"
 	"github.com/hacbs-contract/ec-cli/internal/policy/source"
 	"github.com/hacbs-contract/ec-cli/internal/utils"
@@ -35,23 +35,23 @@ import (
 type mockEvaluator struct{}
 type badMockEvaluator struct{}
 
-func (e mockEvaluator) Evaluate(ctx context.Context, inputs []string) ([]conftestout.CheckResult, error) {
-	return []conftestout.CheckResult{}, nil
+func (e mockEvaluator) Evaluate(ctx context.Context, inputs []string) (evaluator.CheckResults, error) {
+	return evaluator.CheckResults{}, nil
 }
 
 func (e mockEvaluator) Destroy() {
 }
 
-func (b badMockEvaluator) Evaluate(ctx context.Context, inputs []string) ([]conftestout.CheckResult, error) {
+func (b badMockEvaluator) Evaluate(ctx context.Context, inputs []string) (evaluator.CheckResults, error) {
 	return nil, errors.New("Evaluator error")
 }
 
 func (e badMockEvaluator) Destroy() {
 }
 
-func mockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*pipeline_definition_file.DefinitionFile, error) {
+func mockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error) {
 	if fpath == "good" {
-		return &pipeline_definition_file.DefinitionFile{
+		return &definition.Definition{
 			Evaluator: mockEvaluator{},
 		}, nil
 
@@ -59,8 +59,8 @@ func mockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []
 	return nil, fmt.Errorf("fpath '%s' does not exist", fpath)
 }
 
-func badMockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*pipeline_definition_file.DefinitionFile, error) {
-	return &pipeline_definition_file.DefinitionFile{
+func badMockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error) {
+	return &definition.Definition{
 		Evaluator: badMockEvaluator{},
 	}, nil
 }
@@ -71,13 +71,13 @@ func Test_ValidatePipeline(t *testing.T) {
 		fpath   string
 		err     error
 		output  *output.Output
-		defFunc func(ctx context.Context, fpath string, sources []source.PolicySource) (*pipeline_definition_file.DefinitionFile, error)
+		defFunc func(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error)
 	}{
 		{
 			name:    "validation succeeds",
 			fpath:   "good",
 			err:     nil,
-			output:  &output.Output{PolicyCheck: []conftestout.CheckResult{}},
+			output:  &output.Output{PolicyCheck: evaluator.CheckResults{}},
 			defFunc: mockNewPipelineDefinitionFile,
 		},
 		{
@@ -100,8 +100,8 @@ func Test_ValidatePipeline(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pipeline_def_file = tt.defFunc
-			output, err := ValidatePipeline(ctx, tt.fpath, []source.PolicySource{})
+			def_file = tt.defFunc
+			output, err := ValidateDefinition(ctx, tt.fpath, []source.PolicySource{})
 			assert.Equal(t, tt.err, err)
 			assert.Equal(t, tt.output, output)
 		})

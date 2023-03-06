@@ -34,22 +34,23 @@ import (
 	"github.com/hacbs-contract/ec-cli/internal/utils"
 )
 
-type imageValidationFunc func(context.Context, string, policy.Policy) (*output.Output, error)
+type imageValidationFunc func(context.Context, string, policy.Policy, bool) (*output.Output, error)
 
 func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 	var data = struct {
-		policyConfiguration string
+		effectiveTime       string
+		filePath            string
 		imageRef            string
+		info                bool
+		input               string
+		output              []string
+		outputFile          string
+		policy              policy.Policy
+		policyConfiguration string
 		publicKey           string
 		rekorURL            string
-		strict              bool
-		input               string
-		filePath            string
-		outputFile          string
-		output              []string
 		spec                *appstudioshared.ApplicationSnapshotSpec
-		policy              policy.Policy
-		effectiveTime       string
+		strict              bool
 	}{
 
 		policyConfiguration: "enterprise-contract-service/default",
@@ -163,7 +164,7 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 					defer lock.Done()
 
 					ctx := cmd.Context()
-					out, err := validate(ctx, comp.ContainerImage, data.policy)
+					out, err := validate(ctx, comp.ContainerImage, data.policy, data.info)
 					res := result{
 						err: err,
 						component: applicationsnapshot.Component{
@@ -179,9 +180,9 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 					if err == nil {
 						res.component.Violations = out.Violations()
 						res.component.Warnings = out.Warnings()
+						res.component.Successes = out.Successes()
 						res.component.Signatures = out.Signatures
 						res.component.ContainerImage = out.ImageURL
-						res.component.SuccessCount = out.SuccessCount()
 					}
 					res.component.Success = err == nil && len(res.component.Violations) == 0
 
@@ -210,11 +211,10 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 				data.output = append(data.output, fmt.Sprintf("%s=%s", applicationsnapshot.JSON, data.outputFile))
 			}
 
-			publicKeyPEM, err := data.policy.PublicKeyPEM()
+			report, err := applicationsnapshot.NewReport(components, data.policy)
 			if err != nil {
 				return err
 			}
-			report := applicationsnapshot.NewReport(components, string(publicKeyPEM))
 			p := format.NewTargetParser(applicationsnapshot.JSON, cmd.OutOrStdout(), utils.FS(cmd.Context()))
 			if err := report.WriteAll(data.output, p); err != nil {
 				return err
@@ -263,6 +263,11 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 		current time, "attestation" - for time from the youngest attestation, or
 		a RFC3339 formatted value, e.g. 2022-11-18T00:00:00Z.
 	`))
+
+	cmd.Flags().BoolVar(&data.info, "info", data.info, hd.Doc(`
+		Include additional information on the failures. For instance for policy
+		violations, include the title and the description of the failed policy
+		rule.`))
 
 	if len(data.input) > 0 || len(data.filePath) > 0 {
 		if err := cmd.MarkFlagRequired("image"); err != nil {
