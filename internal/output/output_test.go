@@ -21,11 +21,10 @@ package output
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/open-policy-agent/conftest/output"
-	"github.com/sigstore/cosign/pkg/cosign"
+	"github.com/sigstore/cosign/v2/pkg/cosign"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/hacbs-contract/ec-cli/internal/evaluator"
@@ -284,24 +283,24 @@ func Test_Violations(t *testing.T) {
 		{
 			name: "failing attestation signature",
 			output: Output{
-				ImageSignatureCheck: VerificationStatus{
+				AttestationSignatureCheck: VerificationStatus{
 					Passed: false,
-					Result: &output.Result{Message: "image signature failed"},
+					Result: &output.Result{Message: "attestation signature failed"},
 				},
 				ImageAccessibleCheck: VerificationStatus{
 					Passed: true,
 				},
-				AttestationSignatureCheck: VerificationStatus{
+				ImageSignatureCheck: VerificationStatus{
 					Passed: false,
-					Result: &output.Result{Message: "attestation signature failed"},
+					Result: &output.Result{Message: "image signature failed"},
 				},
 				AttestationSyntaxCheck: VerificationStatus{
 					Passed: true,
 				},
 			},
 			expected: []output.Result{
-				{Message: "image signature failed"},
 				{Message: "attestation signature failed"},
+				{Message: "image signature failed"},
 			},
 		},
 		{
@@ -370,20 +369,12 @@ func Test_Violations(t *testing.T) {
 		{
 			name: "failing everything",
 			output: Output{
-				ImageSignatureCheck: VerificationStatus{
-					Passed: false,
-					Result: &output.Result{Message: "image signature failed"},
-				},
-				ImageAccessibleCheck: VerificationStatus{
-					Passed: true,
-				},
 				AttestationSignatureCheck: VerificationStatus{
 					Passed: false,
 					Result: &output.Result{Message: "attestation signature failed"},
 				},
-				AttestationSyntaxCheck: VerificationStatus{
-					Passed: false,
-					Result: &output.Result{Message: "invalid attestation syntax"},
+				ImageAccessibleCheck: VerificationStatus{
+					Passed: true,
 				},
 				PolicyCheck: evaluator.CheckResults{
 					{
@@ -399,22 +390,26 @@ func Test_Violations(t *testing.T) {
 						},
 					},
 				},
+				ImageSignatureCheck: VerificationStatus{
+					Passed: false,
+					Result: &output.Result{Message: "image signature failed"},
+				},
+				AttestationSyntaxCheck: VerificationStatus{
+					Passed: false,
+					Result: &output.Result{Message: "invalid attestation syntax"},
+				},
 			},
 			expected: []output.Result{
-				{Message: "image signature failed"},
 				{Message: "attestation signature failed"},
-				{Message: "invalid attestation syntax"},
 				{Message: "failed policy check 1"},
 				{Message: "failed policy check 2"},
+				{Message: "image signature failed"},
+				{Message: "invalid attestation syntax"},
 			},
 		},
 		{
 			name: "mixed results",
 			output: Output{
-				ImageSignatureCheck: VerificationStatus{
-					Passed: false,
-					Result: &output.Result{Message: "image signature failed"},
-				},
 				ImageAccessibleCheck: VerificationStatus{
 					Passed: true,
 				},
@@ -466,14 +461,18 @@ func Test_Violations(t *testing.T) {
 						},
 					},
 				},
+				ImageSignatureCheck: VerificationStatus{
+					Passed: false,
+					Result: &output.Result{Message: "image signature failed"},
+				},
 			},
 			expected: []output.Result{
-				{Message: "image signature failed"},
 				{Message: "attestation signature failed"},
 				{Message: "failure for policy check 1"},
 				{Message: "failure for policy check 2"},
 				{Message: "failure for policy check 5"},
 				{Message: "failure for policy check 6"},
+				{Message: "image signature failed"},
 			},
 		},
 	}
@@ -626,6 +625,9 @@ func TestSetImageAccessibleCheckFromError(t *testing.T) {
 }
 
 func TestSetImageSignatureCheckFromError(t *testing.T) {
+	noMatchingSignatures := cosign.NewVerificationError("kaboom!")
+	noMatchingSignatures.(*cosign.VerificationError).SetErrorType(cosign.ErrNoMatchingSignaturesType)
+
 	cases := []struct {
 		name           string
 		err            error
@@ -647,7 +649,7 @@ func TestSetImageSignatureCheckFromError(t *testing.T) {
 		{
 			name:           "missing signatures failure",
 			expectedPassed: false,
-			err:            fmt.Errorf("%w: kaboom!", cosign.ErrNoMatchingSignatures),
+			err:            noMatchingSignatures,
 			expectedResult: &output.Result{
 				Message: missingSignatureMessage,
 			},
@@ -665,6 +667,9 @@ func TestSetImageSignatureCheckFromError(t *testing.T) {
 	}
 }
 func TestSetAttestationSignatureCheckFromError(t *testing.T) {
+	noMatchingAttestations := cosign.NewVerificationError("kaboom!")
+	noMatchingAttestations.(*cosign.VerificationError).SetErrorType(cosign.ErrNoMatchingAttestationsType)
+
 	cases := []struct {
 		name           string
 		err            error
@@ -686,7 +691,7 @@ func TestSetAttestationSignatureCheckFromError(t *testing.T) {
 		{
 			name:           "missing attestations failure",
 			expectedPassed: false,
-			err:            fmt.Errorf("%w: kaboom!", cosign.ErrNoMatchingAttestations),
+			err:            noMatchingAttestations,
 			expectedResult: &output.Result{
 				Message: missingAttestationMessage,
 			},

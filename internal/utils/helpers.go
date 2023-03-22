@@ -19,10 +19,13 @@ package utils
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"unicode"
 
 	"github.com/ghodss/yaml"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 )
 
@@ -73,6 +76,15 @@ func CreateWorkDir(fs afero.Fs) (string, error) {
 	return workDir, nil
 }
 
+// CleanupWorkDir removes all files in a directory
+// Eat any errors so we can call it from defer
+func CleanupWorkDir(fs afero.Fs, path string) {
+	err := fs.RemoveAll(path)
+	if err != nil {
+		log.Debugf("Ignoring error removing temporary work dir %s: %v", path, err)
+	}
+}
+
 type ioContextKey int
 
 const fsKey ioContextKey = 0
@@ -87,4 +99,39 @@ func FS(ctx context.Context) afero.Fs {
 
 func WithFS(ctx context.Context, fs afero.Fs) context.Context {
 	return context.WithValue(ctx, fsKey, fs)
+}
+
+// create a file in a temp dir with contents of data
+func WriteTempFile(ctx context.Context, data, prefix string) (string, error) {
+	fs := FS(ctx)
+	file, err := afero.TempFile(fs, "", fmt.Sprintf("%s*", prefix))
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if _, err := file.WriteString(data); err != nil {
+		_ = fs.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// detect if the string is json
+func IsJson(data string) bool {
+	var jsMsg json.RawMessage
+	return json.Unmarshal([]byte(data), &jsMsg) == nil
+}
+
+// detect if the string is yamlMap
+func IsYamlMap(data string) bool {
+	if data == "" {
+		return false
+	}
+	var yamlMap map[string]interface{}
+	return yaml.Unmarshal([]byte(data), &yamlMap) == nil
+}
+
+func IsFile(ctx context.Context, path string) (bool, error) {
+	fs := FS(ctx)
+	return afero.Exists(fs, path)
 }

@@ -18,15 +18,18 @@
 name: Release
 
 "on":
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: [Checks]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   release:
 
     name: Release
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event.workflow_dispatch }}
 
     env:
       IMAGE_REPO: quay.io/hacbs-contract/ec-cli
@@ -47,7 +50,7 @@ jobs:
           restore-keys: release-
 
       - name: Setup Go environment
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version-file: go.mod
 
@@ -80,10 +83,10 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           prerelease: true
-          name: Development snapshot
-          body: Unstable development snapshot release.
+          name: Rolling release 
+          body: Stable rolling release. Version can be determined by running `ec version`
           tag_name: snapshot
-          generate_release_notes: true
+          generate_release_notes: false
           files: dist/*
 
       - name: Registry login

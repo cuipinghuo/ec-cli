@@ -20,10 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
+	"sort"
 
 	"github.com/open-policy-agent/conftest/output"
-	"github.com/sigstore/cosign/pkg/cosign"
+	"github.com/sigstore/cosign/v2/pkg/cosign"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hacbs-contract/ec-cli/internal/evaluator"
@@ -102,7 +102,7 @@ func (o *Output) SetImageSignatureCheckFromError(err error) {
 	o.ImageSignatureCheck.Passed = false
 
 	var message string
-	if strings.HasPrefix(err.Error(), cosign.ErrNoMatchingSignatures.Error()) {
+	if verr, ok := err.(*cosign.VerificationError); ok && verr.ErrorType() == cosign.ErrNoMatchingSignaturesType {
 		// If the error is due to no matching signatures, use a more user-friendly message.
 		message = missingSignatureMessage
 	} else {
@@ -124,7 +124,7 @@ func (o *Output) SetAttestationSignatureCheckFromError(err error) {
 	o.AttestationSignatureCheck.Passed = false
 
 	var message string
-	if strings.HasPrefix(err.Error(), cosign.ErrNoMatchingAttestations.Error()) {
+	if verr, ok := err.(*cosign.VerificationError); ok && verr.ErrorType() == cosign.ErrNoMatchingAttestationsType {
 		// If the error is due to no matching attestations, use a more user-friendly message.
 		message = missingAttestationMessage
 	} else {
@@ -198,6 +198,7 @@ func (o Output) Violations() []output.Result {
 	violations = o.AttestationSyntaxCheck.addToViolations(violations)
 	violations = o.addCheckResultsToViolations(violations)
 
+	violations = sortResults(violations)
 	return violations
 }
 
@@ -207,15 +208,38 @@ func (o Output) Warnings() []output.Result {
 	for _, result := range o.PolicyCheck {
 		warnings = append(warnings, result.Warnings...)
 	}
+
+	warnings = sortResults(warnings)
 	return warnings
 }
 
+// Successes aggregates and returns all successes.
 func (o Output) Successes() []output.Result {
 	successes := make([]output.Result, 0, 10)
 	for _, result := range o.PolicyCheck {
 		successes = append(successes, result.Successes...)
 	}
+
+	successes = sortResults(successes)
 	return successes
+}
+
+// sortResults sorts Result slices.
+func sortResults(results []output.Result) []output.Result {
+	sort.Slice(results, func(i, j int) bool {
+		iCode := evaluator.ExtractStringFromMetadata(results[i], "code")
+		jCode := evaluator.ExtractStringFromMetadata(results[j], "code")
+		if iCode == jCode {
+			iTerm := evaluator.ExtractStringFromMetadata(results[i], "term")
+			jTerm := evaluator.ExtractStringFromMetadata(results[j], "term")
+			if iTerm == jTerm {
+				return results[i].Message < results[j].Message
+			}
+			return iTerm < jTerm
+		}
+		return iCode < jCode
+	})
+	return results
 }
 
 // Print prints an Output instance

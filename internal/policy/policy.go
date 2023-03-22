@@ -19,19 +19,24 @@ package policy
 import (
 	"context"
 	"crypto"
-	"encoding/json"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/ghodss/yaml"
 	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
 	"github.com/hashicorp/go-multierror"
-	"github.com/sigstore/cosign/cmd/cosign/cli/rekor"
-	"github.com/sigstore/cosign/pkg/cosign"
-	cosignSig "github.com/sigstore/cosign/pkg/signature"
+	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
+	"github.com/sigstore/cosign/v2/pkg/cosign"
+	cosignSig "github.com/sigstore/cosign/v2/pkg/signature"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
 	sigstoreSig "github.com/sigstore/sigstore/pkg/signature"
+	"github.com/sigstore/sigstore/pkg/tuf"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/hacbs-contract/ec-cli/internal/kubernetes"
@@ -106,6 +111,24 @@ func NewOfflinePolicy(ctx context.Context, effectiveTime string) (Policy, error)
 	}
 }
 
+// NewInertPolicy construct and return a new instance of Policy that doesn't
+// perform strict checks on the consistency of the policy.
+//
+// The policyRef parameter is expected to be either a JSON-encoded instance of
+// EnterpriseContractPolicySpec, or reference to the location of the EnterpriseContractPolicy
+// resource in Kubernetes using the format: [namespace/]name
+//
+// If policyRef is blank, an empty EnterpriseContractPolicySpec is used.
+func NewInertPolicy(ctx context.Context, policyRef string) (Policy, error) {
+	p := policy{}
+
+	if err := p.loadPolicy(ctx, policyRef); err != nil {
+		return nil, err
+	}
+
+	return &p, nil
+}
+
 // NewPolicy construct and return a new instance of Policy.
 //
 // The policyRef parameter is expected to be either a JSON-encoded instance of
@@ -124,31 +147,8 @@ func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTim
 		choosenTime: effectiveTime,
 	}
 
-	if policyRef == "" {
-		log.Debug("Using an empty EnterpriseContractPolicy")
-		// Default to an empty policy instead of returning an error because the required
-		// values, e.g. PublicKey, may be provided via other means, e.g. publicKey param.
-	} else if strings.Contains(policyRef, "{") {
-		log.Debug("Read EnterpriseContractPolicy as JSON")
-		if err := json.Unmarshal([]byte(policyRef), &p); err != nil {
-			log.Debugf("Problem parsing EnterpriseContractPolicy Spec from %q", policyRef)
-			return nil, fmt.Errorf("unable to parse EnterpriseContractPolicy Spec: %w", err)
-		}
-	} else {
-		log.Debug("Read EnterpriseContractPolicy as k8s resource")
-		k8s, err := kubernetes.NewClient(ctx)
-		if err != nil {
-			log.Debug("Failed to initialize Kubernetes client")
-			return nil, fmt.Errorf("cannot initialize Kubernetes client: %w", err)
-		}
-		log.Debug("Initialized Kubernetes client")
-
-		ecp, err := k8s.FetchEnterpriseContractPolicy(ctx, policyRef)
-		if err != nil {
-			log.Debug("Failed to fetch the enterprise contract policy from the cluster!")
-			return nil, fmt.Errorf("unable to fetch EnterpriseContractPolicy: %w", err)
-		}
-		p.EnterpriseContractPolicySpec = ecp.Spec
+	if err := p.loadPolicy(ctx, policyRef); err != nil {
+		return nil, err
 	}
 
 	if rekorUrl != "" && rekorUrl != p.RekorUrl {
@@ -178,6 +178,41 @@ func NewPolicy(ctx context.Context, policyRef, rekorUrl, publicKey, effectiveTim
 	}
 
 	return &p, nil
+}
+
+func (p *policy) loadPolicy(ctx context.Context, policyRef string) error {
+	if policyRef == "" {
+		log.Debug("Using an empty EnterpriseContractPolicy")
+		// Default to an empty policy instead of returning an error because the required
+		// values, e.g. PublicKey, may be provided via other means, e.g.
+		// publicKey param.
+		return nil
+	}
+
+	if strings.Contains(policyRef, ":") { // Should detect JSON or YAML objects 🤞
+		log.Debug("Read EnterpriseContractPolicy as YAML")
+		if err := yaml.Unmarshal([]byte(policyRef), &p); err != nil {
+			log.Debugf("Problem parsing EnterpriseContractPolicy Spec from %q", policyRef)
+			return fmt.Errorf("unable to parse EnterpriseContractPolicy Spec: %w", err)
+		}
+	} else {
+		log.Debug("Read EnterpriseContractPolicy as k8s resource")
+		k8s, err := kubernetes.NewClient(ctx)
+		if err != nil {
+			log.Debug("Failed to initialize Kubernetes client")
+			return fmt.Errorf("cannot initialize Kubernetes client: %w", err)
+		}
+		log.Debug("Initialized Kubernetes client")
+
+		ecp, err := k8s.FetchEnterpriseContractPolicy(ctx, policyRef)
+		if err != nil {
+			log.Debug("Failed to fetch the enterprise contract policy from the cluster!")
+			return fmt.Errorf("unable to fetch EnterpriseContractPolicy: %w", err)
+		}
+		p.EnterpriseContractPolicySpec = ecp.Spec
+	}
+
+	return nil
 }
 
 func (p *policy) WithSpec(spec ecc.EnterpriseContractPolicySpec) Policy {
@@ -251,17 +286,43 @@ func checkOpts(ctx context.Context, p *policy) (*cosign.CheckOpts, error) {
 	}
 	opts.SigVerifier = verifier
 
-	rekorUrl := p.RekorUrl
-	if rekorUrl != "" {
-		rekorClient, err := rekor.NewClient(rekorUrl)
+	if p.RekorUrl == "" {
+		opts.IgnoreTlog = true
+	} else {
+		rekorClient, err := rekor.NewClient(p.RekorUrl)
 		if err != nil {
-			log.Debugf("Problem creating a rekor client using url %q", rekorUrl)
+			log.Debugf("Problem creating a rekor client using url %q", p.RekorUrl)
 			return nil, err
 		}
 
 		opts.RekorClient = rekorClient
 		log.Debug("Rekor client created")
+
+		// TODO the Rekor public key and entry id should originate in the policy
+		rekorPublicKeyPEM := os.Getenv("REKOR_PUBLIC_KEY")
+		if rekorPublicKeyPEM != "" {
+			rekorPublicKey, err := cryptoutils.UnmarshalPEMToPublicKey([]byte(rekorPublicKeyPEM))
+			if err != nil {
+				return nil, err
+			}
+			rekorPublicKeyBytes, err := x509.MarshalPKIXPublicKey(rekorPublicKey)
+			if err != nil {
+				return nil, err
+			}
+			digest := sha256.Sum256(rekorPublicKeyBytes)
+			logId := hex.EncodeToString(digest[:])
+
+			opts.RekorPubKeys = &cosign.TrustedTransparencyLogPubKeys{
+				Keys: map[string]cosign.TransparencyLogPubKey{
+					logId: {
+						PubKey: rekorPublicKey,
+						Status: tuf.Active,
+					},
+				},
+			}
+		}
 	}
+
 	return &opts, nil
 }
 

@@ -83,17 +83,25 @@ type conftestEvaluator struct {
 	policyDir     string
 	policy        policy.Policy
 	fs            afero.Fs
+	namespace     []string
 }
 
 // NewConftestEvaluator returns initialized conftestEvaluator implementing
 // Evaluator interface
 func NewConftestEvaluator(ctx context.Context, policySources []source.PolicySource, p policy.Policy) (Evaluator, error) {
+	return NewConftestEvaluatorWithNamespace(ctx, policySources, p, nil)
+
+}
+
+// set the policy namespace
+func NewConftestEvaluatorWithNamespace(ctx context.Context, policySources []source.PolicySource, p policy.Policy, namespace []string) (Evaluator, error) {
 	fs := utils.FS(ctx)
 	c := conftestEvaluator{
 		policySources: policySources,
 		outputFormat:  "json",
 		policy:        p,
 		fs:            fs,
+		namespace:     namespace,
 	}
 
 	dir, err := utils.CreateWorkDir(fs)
@@ -145,8 +153,9 @@ func (r *policyRules) collect(a *ast.AnnotationsRef) {
 func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (CheckResults, error) {
 	results := make([]CheckResult, 0, 10)
 
-	// Download all sources
+	// hold all rule annotations
 	rules := policyRules{}
+	// Download all sources
 	for _, s := range c.policySources {
 		dir, err := s.GetPolicy(ctx, c.workDir, false)
 		if err != nil {
@@ -173,10 +182,17 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 	var ok bool
 	if r, ok = ctx.Value(runnerKey).(testRunner); r == nil || !ok {
 
+		// should there be a namespace defined or not
+		allNamespaces := true
+		if len(c.namespace) > 0 {
+			allNamespaces = false
+		}
+
 		r = &runner.TestRunner{
 			Data:          []string{c.dataDir},
 			Policy:        []string{c.policyDir},
-			AllNamespaces: true,
+			Namespace:     c.namespace,
+			AllNamespaces: allNamespaces,
 			NoFail:        true,
 			Output:        c.outputFormat,
 		}
@@ -184,6 +200,7 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 
 	log.Debugf("runner: %#v", r)
 	log.Debugf("inputs: %#v", inputs)
+
 	runResults, err := r.Run(ctx, inputs)
 	if err != nil {
 		// TODO do we want to evaluate further policies instead of erroring out?
@@ -192,14 +209,20 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 
 	effectiveTime := c.policy.EffectiveTime()
 
+	// loop over each policy (namespace) evaluation
+	// effectively replacing the results returned from conftest
+	ruleCollection := make(map[string]bool)
 	for i, result := range runResults {
 		log.Debugf("Evaluation result at %d: %#v", i, result)
 		warnings := []output.Result{}
 		failures := []output.Result{}
-
-		addMetadata(&result, rules)
+		exceptions := []output.Result{}
+		skipped := []output.Result{}
 
 		for _, warning := range result.Warnings {
+			r, ok := addRuleMetadata(&warning, rules)
+			ruleCollection[r] = ok
+
 			if !c.isResultIncluded(warning) {
 				log.Debugf("Skipping result warning: %#v", warning)
 				continue
@@ -208,10 +231,14 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 		}
 
 		for _, failure := range result.Failures {
+			r, ok := addRuleMetadata(&failure, rules)
+			ruleCollection[r] = ok
+
 			if !c.isResultIncluded(failure) {
 				log.Debugf("Skipping result failure: %#v", failure)
 				continue
 			}
+
 			if !isResultEffective(failure, effectiveTime) {
 				// TODO: Instead of moving to warnings, create new attribute: "futureViolations"
 				warnings = append(warnings, failure)
@@ -220,8 +247,22 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 			}
 		}
 
+		for _, exception := range result.Exceptions {
+			r, ok := addRuleMetadata(&exception, rules)
+			ruleCollection[r] = ok
+			exceptions = append(exceptions, exception)
+		}
+
+		for _, skip := range result.Skipped {
+			r, ok := addRuleMetadata(&skip, rules)
+			ruleCollection[r] = ok
+			skipped = append(skipped, skip)
+		}
+
 		result.Warnings = warnings
 		result.Failures = failures
+		result.Exceptions = exceptions
+		result.Skipped = skipped
 
 		results = append(results, CheckResult{CheckResult: result})
 	}
@@ -235,7 +276,13 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 		results[0].Successes = make([]output.Result, 0, l)
 	}
 
+	// any rule left DID NOT get metadata added so it's a success
+	// this depends on the delete in addMetadata
 	for code, rule := range rules {
+		if ruleCode, ok := ruleCollection[code]; ruleCode && ok {
+			continue
+		}
+
 		result := output.Result{
 			Message: "Pass",
 			Metadata: map[string]interface{}{
@@ -254,6 +301,25 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 		if len(rule.Collections) > 0 {
 			result.Metadata["collections"] = rule.Collections
 		}
+
+		if !c.isResultIncluded(result) {
+			log.Debugf("Skipping result success: %#v", result)
+			continue
+		}
+
+		if rule.EffectiveOn != "" {
+			result.Metadata[metadataEffectiveOn] = rule.EffectiveOn
+		}
+
+		if !isResultEffective(result, effectiveTime) {
+			log.Debugf("Skipping result success: %#v", result)
+			continue
+		}
+
+		// Todo maybe: We could also call isResultEffective here for the
+		// success and skip it if the rule is not yet effective. This would
+		// require collecting the effective_on value from the custom annotation
+		// in rule.RuleInfo.
 
 		results[0].Successes = append(results[0].Successes, result)
 	}
@@ -279,57 +345,44 @@ func (c conftestEvaluator) Evaluate(ctx context.Context, inputs []string) (Check
 	return results, nil
 }
 
-func addMetadata(result *output.CheckResult, rules policyRules) {
-	addMetadataToResults(result.Exceptions, rules)
-	addMetadataToResults(result.Failures, rules)
-	addMetadataToResults(result.Skipped, rules)
-	addMetadataToResults(result.Warnings, rules)
+func addRuleMetadata(result *output.Result, rules policyRules) (string, bool) {
+	code, ok := (*result).Metadata[metadataCode].(string)
+	if ok {
+		addMetadataToResults(result, rules[code])
+		return code, true
+	}
+	return "", false
 }
 
-func addMetadataToResults(results []output.Result, rules policyRules) {
-	for i := range results {
-		r := &results[i]
-		if r.Metadata == nil {
-			continue
-		}
-
-		// normalize collection to []string
-		if v, ok := r.Metadata[metadataCollections]; ok {
-			switch vals := v.(type) {
-			case []any:
-				col := make([]string, 0, len(vals))
-				for _, c := range vals {
-					col = append(col, fmt.Sprint(c))
-				}
-				r.Metadata[metadataCollections] = col
-			case []string:
-				// all good, mainly left for documentation of the normalization
-			default:
-				// remove unsupported collections attribute
-				delete(r.Metadata, metadataCollections)
+func addMetadataToResults(r *output.Result, rule rule.Info) {
+	if r.Metadata == nil {
+		return
+	}
+	// normalize collection to []string
+	if v, ok := r.Metadata[metadataCollections]; ok {
+		switch vals := v.(type) {
+		case []any:
+			col := make([]string, 0, len(vals))
+			for _, c := range vals {
+				col = append(col, fmt.Sprint(c))
 			}
+			r.Metadata[metadataCollections] = col
+		case []string:
+			// all good, mainly left for documentation of the normalization
+		default:
+			// remove unsupported collections attribute
+			delete(r.Metadata, metadataCollections)
 		}
+	}
 
-		code, ok := r.Metadata[metadataCode].(string)
-		if !ok {
-			continue
-		}
-
-		rule, ok := (rules)[code]
-		if !ok {
-			continue
-		}
-		delete((rules), code)
-
-		if rule.Title != "" {
-			r.Metadata[metadataTitle] = rule.Title
-		}
-		if rule.Description != "" {
-			r.Metadata[metadataDescription] = rule.Description
-		}
-		if len(rule.Collections) > 0 {
-			r.Metadata[metadataCollections] = rule.Collections
-		}
+	if rule.Title != "" {
+		r.Metadata[metadataTitle] = rule.Title
+	}
+	if rule.Description != "" {
+		r.Metadata[metadataDescription] = rule.Description
+	}
+	if len(rule.Collections) > 0 {
+		r.Metadata[metadataCollections] = rule.Collections
 	}
 }
 
@@ -346,42 +399,9 @@ func createConfigJSON(ctx context.Context, dataDir string, p policy.Policy) erro
 		"config": map[string]interface{}{},
 	}
 
-	type policyConfig struct {
-		// TODO: NonBlocking and Exclude should eventually not be propagated to the
-		// policy config. However, some policy rules, i.e. release.test, have custom
-		// logic to exclude certain failures. Also, NonBlocking is deprecated and
-		// should be removed soon.
-		NonBlocking *[]string `json:"non_blocking_checks,omitempty"`
-		Exclude     *[]string `json:"exclude,omitempty"`
-		// TODO: Do not propagate Include and Collections once ec-policies start
-		// emitting collections metadata.
-		Include     *[]string `json:"include,omitempty"`
-		Collections *[]string `json:"collections,omitempty"`
-		WhenNs      int64     `json:"when_ns"`
-	}
-	pc := &policyConfig{}
-
-	// TODO: Once the NonBlocking field has been removed, update to dump the spec.Config into an updated policyConfig struct
-	if p.Spec().Exceptions != nil {
-		log.Debug("Non-blocking exceptions found. These will be written to file ", dataDir)
-		pc.NonBlocking = &p.Spec().Exceptions.NonBlocking
-	}
-
-	cfg := p.Spec().Configuration
-	if cfg != nil {
-		log.Debug("Include rules found. These will be written to file ", dataDir)
-		if cfg.Include != nil {
-			pc.Include = &cfg.Include
-		}
-		log.Debug("Exclude rules found. These will be written to file ", dataDir)
-		if cfg.Exclude != nil {
-			pc.Exclude = &cfg.Exclude
-		}
-		log.Debug("Collections found. These will be written to file ", dataDir)
-		if cfg.Collections != nil {
-			pc.Collections = &cfg.Collections
-		}
-	}
+	pc := &struct {
+		WhenNs int64 `json:"when_ns"`
+	}{}
 
 	// Now that the future deny logic is handled in the ec-cli and not in rego,
 	// this field is used only for the checking the effective times in the
@@ -481,11 +501,6 @@ func (c conftestEvaluator) isResultIncluded(result output.Result) bool {
 		}
 	}
 
-	if spec.Exceptions != nil {
-		// TODO: NonBlocking is deprecated. Remove it eventually
-		excludes = append(excludes, spec.Exceptions.NonBlocking...)
-	}
-
 	if len(includes)+len(collections) == 0 {
 		includes = []string{"*"}
 	}
@@ -507,8 +522,8 @@ func hasAnyMatch(needles, haystack []string) bool {
 
 // makeMatchers returns the possible matching strings for the result.
 func makeMatchers(result output.Result) []string {
-	code := extractStringFromMetadata(result, metadataCode)
-	term := extractStringFromMetadata(result, metadataTerm)
+	code := ExtractStringFromMetadata(result, metadataCode)
+	term := ExtractStringFromMetadata(result, metadataTerm)
 	parts := strings.Split(code, ".")
 	var pkg string
 	if len(parts) >= 2 {
@@ -547,8 +562,8 @@ func extractCollections(result output.Result) []string {
 	return collections
 }
 
-// extractStringFromMetadata returns the string value from the result metadata at the given key.
-func extractStringFromMetadata(result output.Result, key string) string {
+// ExtractStringFromMetadata returns the string value from the result metadata at the given key.
+func ExtractStringFromMetadata(result output.Result, key string) string {
 	if maybeValue, exists := result.Metadata[key]; exists {
 		if value, ok := maybeValue.(string); ok {
 			return value

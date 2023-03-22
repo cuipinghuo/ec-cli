@@ -24,7 +24,7 @@ import (
 
 	hd "github.com/MakeNowJust/heredoc"
 	"github.com/hashicorp/go-multierror"
-	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	app "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	"github.com/spf13/cobra"
 
 	"github.com/hacbs-contract/ec-cli/internal/applicationsnapshot"
@@ -49,7 +49,8 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 		policyConfiguration string
 		publicKey           string
 		rekorURL            string
-		spec                *appstudioshared.ApplicationSnapshotSpec
+		snapshot            string
+		spec                *app.SnapshotSpec
 		strict              bool
 	}{
 
@@ -128,9 +129,12 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 
 		PreRunE: func(cmd *cobra.Command, args []string) (allErrors error) {
 			ctx := cmd.Context()
-			if s, err := applicationsnapshot.DetermineInputSpec(
-				utils.FS(ctx), data.filePath, data.input, data.imageRef,
-			); err != nil {
+			if s, err := applicationsnapshot.DetermineInputSpec(ctx, applicationsnapshot.Input{
+				File:     data.filePath,
+				JSON:     data.input,
+				Image:    data.imageRef,
+				Snapshot: data.snapshot,
+			}); err != nil {
 				allErrors = multierror.Append(allErrors, err)
 			} else {
 				data.spec = s
@@ -160,7 +164,7 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 			var lock sync.WaitGroup
 			for _, c := range appComponents {
 				lock.Add(1)
-				go func(comp appstudioshared.ApplicationSnapshotComponent) {
+				go func(comp app.SnapshotComponent) {
 					defer lock.Done()
 
 					ctx := cmd.Context()
@@ -168,7 +172,7 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 					res := result{
 						err: err,
 						component: applicationsnapshot.Component{
-							ApplicationSnapshotComponent: appstudioshared.ApplicationSnapshotComponent{
+							SnapshotComponent: app.SnapshotComponent{
 								Name:           comp.Name,
 								ContainerImage: comp.ContainerImage,
 							},
@@ -211,7 +215,7 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 				data.output = append(data.output, fmt.Sprintf("%s=%s", applicationsnapshot.JSON, data.outputFile))
 			}
 
-			report, err := applicationsnapshot.NewReport(components, data.policy)
+			report, err := applicationsnapshot.NewReport(data.snapshot, components, data.policy)
 			if err != nil {
 				return err
 			}
@@ -263,6 +267,10 @@ func validateImageCmd(validate imageValidationFunc) *cobra.Command {
 		current time, "attestation" - for time from the youngest attestation, or
 		a RFC3339 formatted value, e.g. 2022-11-18T00:00:00Z.
 	`))
+
+	cmd.Flags().StringVar(&data.snapshot, "snapshot", "", hd.Doc(`
+		Provide the AppStudio Snapshot as a source of the images to validate, as inline
+		JSON of the "spec" or a reference to a Kubernetes object [<namespace>/]<name>`))
 
 	cmd.Flags().BoolVar(&data.info, "info", data.info, hd.Doc(`
 		Include additional information on the failures. For instance for policy

@@ -12,10 +12,10 @@ SHELL=$(if $@,$(info ❱ [1m$@[0m))$(_SHELL)
 ROOT_DIR:=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 COPY:="Red Hat, Inc."
 
-##@ Information targets
+##@ Information
 
 .PHONY: help
-help: ## Display this help.
+help: ## Display this help
 	@awk 'function ww(s) {\
 		if (length(s) < 59) {\
 			return s;\
@@ -36,7 +36,7 @@ help: ## Display this help.
 		}\
 	} BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9%/_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", "make " $$1, ww($$2) } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-##@ Development targets
+##@ Building
 
 .PHONY: $(ALL_SUPPORTED_OS_ARCH)
 $(ALL_SUPPORTED_OS_ARCH): ## Build binaries for specific platform/architecture, e.g. make dist/ec_linux_amd64
@@ -57,8 +57,14 @@ reference-docs: ## Generate reference documentation input YAML files
 	@rm -rf dist/cli-reference
 	@go run internal/documentation/documentation.go -yaml dist/cli-reference
 
+.PHONY: clean
+clean: ## Delete build output
+	@rm dist/*
+
+##@ Testing
+
 .PHONY: test
-test: ## Run unit tests
+test: ## Run all unit tests
 	@go test -race -covermode=atomic -coverprofile=coverage-unit.out -timeout 500ms -tags=unit ./...
 	@go test -race -covermode=atomic -coverprofile=coverage-integration.out -timeout 15s -tags=integration ./...
 # Given the nature of generative tests the test timeout is increased from 500ms
@@ -68,7 +74,7 @@ test: ## Run unit tests
 .ONESHELL:
 .SHELLFLAGS=-e -c
 .PHONY: acceptance
-acceptance: ## Run acceptance tests
+acceptance: ## Run all acceptance tests
 	@ACCEPTANCE_WORKDIR="$$(mktemp -d)"
 	@function cleanup() {
 	  rm -rf "$${ACCEPTANCE_WORKDIR}"
@@ -84,15 +90,33 @@ acceptance: ## Run acceptance tests
 	@go run -modfile "$${ACCEPTANCE_WORKDIR}/tools/go.mod" github.com/wadey/gocovmerge "$${ACCEPTANCE_WORKDIR}"/coverage-acceptance*.out > "$(ROOT_DIR)/coverage-acceptance.out"
 
 # Add @focus above the feature you're hacking on to use this
+# (Mainly for use with the feature-% target below)
 .PHONY: focus-acceptance
-focus-acceptance: ## Run acceptance tests with @focus tag
-	@$(MAKE) build
+focus-acceptance: build ## Run acceptance tests with @focus tag
 	@cd acceptance && go test -tags=acceptance . -args -tags=@focus
 
-LICENSE_IGNORE=-ignore 'dist/cli-reference/*.yaml'
+# Uses sed hackery to insert a @focus tag and then remove it afterwards.
+# (There might be a nicer way to run all scenarios in a single feature.)
+# The `|| true` here is so the @focus tag still gets removed after a failure.
+feature_%: ## Run acceptance tests for a single feature file, e.g. make feature_validate_image
+	@echo "Testing feature '$*'"
+	@sed -i '1i@focus' features/$*.feature
+	@$(MAKE) focus-acceptance || true
+	@sed -i '1d' features/$*.feature
+
+# (Replace spaces with underscores in the scenario name.)
+scenario_%: build ## Run acceptance tests for a single scenario, e.g. make scenario_inline_policy
+	@cd acceptance && go test -test.run 'TestFeatures/$*'
+
+.PHONY: ci
+ci: test lint-fix acceptance ## Run the usual required CI tasks
+
+##@ Linters
+
+LICENSE_IGNORE=-ignore 'dist/cli-reference/*.yaml' -ignore 'node_modules/**'
 LINT_TO_GITHUB_ANNOTATIONS='map(map(.)[])[][] as $$d | $$d.posn | split(":") as $$posn | "::warning file=\($$posn[0]),line=\($$posn[1]),col=\($$posn[2])::\($$d.message)"'
 .PHONY: lint
-lint: ## Run linter
+lint: tekton-lint ## Run linter
 # addlicense doesn't give us a nice explanation so we prefix it with one
 	@go run -modfile tools/go.mod github.com/google/addlicense -c $(COPY) -s -check $(LICENSE_IGNORE) . | sed 's/^/Missing license header in: /g'
 # piping to sed above looses the exit code, luckily addlicense is fast so we invoke it for the second time to exit 1 in case of issues
@@ -112,12 +136,18 @@ lint-fix: ## Fix linting issues automagically
 #	@go run -modfile tools/go.mod ./internal/lint -fix $$(go list ./... | grep -v '/acceptance/')
 	@go run -modfile tools/go.mod github.com/daixiang0/gci write -s standard -s default -s "prefix(github.com/hacbs-contract/ec-cli)" .
 
-.PHONY: ci
-ci: test lint-fix acceptance ## Run the usual required CI tasks
+node_modules: package-lock.json
+	@npm ci
 
-.PHONY: clean
-clean: ## Delete build output
-	@rm dist/*
+TEKTON_LINT_TO_GITHUB_ANNOTATIONS='.[] | "::error file=\(.path),line=\(.loc.startLine),endLine=\(.loc.endLine),col=\(.loc.startColumn),endColumn=\(.loc.endColumn)::\(.message)"'
+# wildcard matches `tasks/<task_name>/<version>/*.yaml`
+tekton-lint: node_modules $(wildcard tasks/*/*/*.yaml) ## Run tekton-lint for 'tasks' subdirectory.
+# We execute tekton-lint for all yaml files contained within the tasks subdirectory, it's smart enough to ignore non-Tekton yaml files.
+# All warnings are currently considered errors.
+# When running on GitHub Actions, reformat to annotations
+	@npm exec tekton-lint -- --max-warnings=0 --format=$(if $(GITHUB_ACTIONS),json,stylish) $(filter-out node_modules,$^)$(if $(GITHUB_ACTIONS), | jq -r $(TEKTON_LINT_TO_GITHUB_ANNOTATIONS))
+
+##@ Pushing images
 
 IMAGE_TAG ?= latest
 IMAGE_REPO ?= quay.io/hacbs-contract/ec-cli
@@ -194,9 +224,17 @@ TASK_TAG ?= latest
 TASK_REPO ?= quay.io/hacbs-contract/ec-task-bundle
 TASK_VERSION ?= 0.1
 TASK ?= tasks/verify-enterprise-contract/$(TASK_VERSION)/verify-enterprise-contract.yaml
+ifneq (,$(findstring localhost:,$(TASK_REPO)))
+SKOPEO_ARGS=--src-tls-verify=false --dest-tls-verify=false
+endif
 .PHONY: task-bundle
 task-bundle: ## Push the Tekton Task bundle an image repository
 	@go run -modfile tools/go.mod github.com/tektoncd/cli/cmd/tkn bundle push $(TASK_REPO):$(TASK_TAG) -f $(TASK)
+# Add OCI annotations to the bundle image
+	tmpdir="$$(mktemp -d --tmpdir)"; \
+	skopeo copy docker://"$(TASK_REPO):$(TASK_TAG)" dir:"$${tmpdir}" $(SKOPEO_ARGS); \
+	echo "$$(jq -c '. += { "annotations": { "org.opencontainers.image.revision": "$(TASK_TAG)" } }' "$${tmpdir}/manifest.json")" > "$${tmpdir}/manifest.json"; \
+	skopeo copy dir:"$${tmpdir}" docker://"$(TASK_REPO):$(TASK_TAG)"  $(SKOPEO_ARGS)
 
 .PHONY: task-bundle-snapshot
 task-bundle-snapshot: task-bundle ## Push task bundle and then tag with "snapshot"

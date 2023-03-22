@@ -30,7 +30,7 @@ import (
 	"github.com/hacbs-contract/ec-cli/internal/utils"
 )
 
-type definitionValidationFn func(context.Context, string, []source.PolicySource) (*output.Output, error)
+type definitionValidationFn func(context.Context, string, []source.PolicySource, []string) (*output.Output, error)
 
 func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 	var data = struct {
@@ -38,11 +38,13 @@ func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 		policyURLs []string
 		dataURLs   []string
 		output     []string
+		namespaces []string
 	}{
 		filePaths:  []string{},
 		policyURLs: []string{"oci::quay.io/hacbs-contract/ec-pipeline-policy:latest"},
 		dataURLs:   []string{"git::https://github.com/hacbs-contract/ec-policies.git//data"},
 		output:     []string{"json"},
+		namespaces: []string{},
 	}
 	cmd := &cobra.Command{
 		Use:   "definition",
@@ -63,6 +65,10 @@ func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 			Validate multiple definition files by repeating --file:
 
 			  ec validate definition --file </path/to/file> --file /path/to/other.file
+
+			Specify --file as JSON
+
+			  ec validate definition --file '{"Kind": "Task"}'
 
 			Specify different policy and data sources:
 
@@ -85,7 +91,7 @@ func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 					sources = append(sources, &source.PolicyUrl{Url: url, Kind: source.DataKind})
 				}
 				ctx := cmd.Context()
-				if o, err := validate(ctx, fpath, sources); err != nil {
+				if o, err := validate(ctx, fpath, sources, data.namespaces); err != nil {
 					allErrors = multierror.Append(allErrors, err)
 				} else {
 					report.Add(*o)
@@ -104,7 +110,7 @@ func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&data.filePaths, "file", "p", data.filePaths,
+	cmd.Flags().StringArrayVarP(&data.filePaths, "file", "f", data.filePaths,
 		"path to definition YAML/JSON file (required)")
 
 	cmd.Flags().StringSliceVar(&data.policyURLs, "policy", data.policyURLs,
@@ -117,6 +123,8 @@ func validateDefinitionCmd(validate definitionValidationFn) *cobra.Command {
 		write output to a file in a specific format, e.g. yaml=/tmp/output.yaml. Use empty string
 		path for stdout, e.g. yaml. May be used multiple times. Possible formats are json and yaml
 	`))
+	cmd.Flags().StringSliceVar(&data.namespaces, "namespace", data.namespaces,
+		"the namespace containing the policy to run. May be used multiple times")
 
 	if err := cmd.MarkFlagRequired("file"); err != nil {
 		panic(err)

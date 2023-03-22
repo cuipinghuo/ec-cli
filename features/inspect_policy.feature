@@ -64,3 +64,70 @@ Feature: inspect policies
         ]
       }
     """
+
+  Scenario: inspecting a data source
+    Given a git repository named "policy-data" with
+      | foo.yaml | examples/rule_data_2.yaml |
+      | bar.json | examples/rule_data_3.json |
+    When ec command is run with "inspect policy-data --source git::http://${GITHOST}/git/policy-data.git -o json"
+    Then the exit status should be 0
+    Then the standard output should contain
+    """
+      {
+        "rule_data": {
+          "banana_fail_reason": "spider attack"
+        },
+        "spam_count": 42
+      }
+    """
+
+  Scenario: inspecting a data source with a merge error
+    Given a git repository named "policy-data" with
+      | foo.yaml | examples/rule_data_1.yaml |
+      | bar.yaml | examples/rule_data_2.yaml |
+    When ec command is run with "inspect policy-data --source git::http://${GITHOST}/git/policy-data.git -o json"
+    Then the exit status should be 1
+    # Todo:
+    #Then the standard error should contain
+    #"""
+    #Error: Merge error. The 'rule_data' key was found more than once!
+    #"""
+
+  Scenario: sources from ECP
+    Given a stub cluster running
+    Given a git repository named "policy1" with
+      | main.rego | examples/with_annotations.rego |
+    Given a git repository named "policy2" with
+      | main.rego | examples/reject.rego |
+    Given policy configuration named "ec-policy" with specification
+    """
+    {
+      "sources": [
+        {
+          "policy": [
+            "git::http://${GITHOST}/git/policy1.git",
+            "git::http://${GITHOST}/git/policy2.git"
+          ]
+        }
+      ]
+    }
+    """
+    When ec command is run with "inspect policy --policy acceptance/ec-policy"
+    Then the exit status should be 0
+    Then the standard output should contain
+    """
+    # Source: git::http://${GITHOST}/git/policy1.git
+
+    policy.release.kitty.purr \(deny\)
+    https://hacbs-contract.github.io/ec-policies/release_policy.html#kitty__purr
+    Kittens
+    Fluffy
+    --
+    # Source: git::http://${GITHOST}/git/policy2.git
+
+    main.rejector \(deny\)
+    Reject rule
+    This rule will always fail
+    \[A\]
+    --
+    """

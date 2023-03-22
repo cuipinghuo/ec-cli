@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -49,59 +50,95 @@ func (b badMockEvaluator) Evaluate(ctx context.Context, inputs []string) (evalua
 func (e badMockEvaluator) Destroy() {
 }
 
-func mockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error) {
-	if fpath == "good" {
-		return &definition.Definition{
-			Evaluator: mockEvaluator{},
-		}, nil
-
-	}
-	return nil, fmt.Errorf("fpath '%s' does not exist", fpath)
+func mockNewPipelineDefinitionFile(ctx context.Context, fpath []string, sources []source.PolicySource, namespace []string) (*definition.Definition, error) {
+	return &definition.Definition{
+		Evaluator: mockEvaluator{},
+	}, nil
 }
 
-func badMockNewPipelineDefinitionFile(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error) {
+func badMockNewPipelineDefinitionFile(ctx context.Context, fpath []string, sources []source.PolicySource, namespace []string) (*definition.Definition, error) {
 	return &definition.Definition{
 		Evaluator: badMockEvaluator{},
 	}, nil
 }
 
 func Test_ValidatePipeline(t *testing.T) {
+	emptyDir := "/empty"
+	nonEmptyDir := "/nonEmpty"
+	validFile := filepath.Join(nonEmptyDir, "file.json")
+	badPath := "bad"
+
 	tests := []struct {
 		name    string
 		fpath   string
 		err     error
 		output  *output.Output
-		defFunc func(ctx context.Context, fpath string, sources []source.PolicySource) (*definition.Definition, error)
+		defFunc func(ctx context.Context, fpath []string, sources []source.PolicySource, namespace []string) (*definition.Definition, error)
 	}{
 		{
 			name:    "validation succeeds",
-			fpath:   "good",
+			fpath:   validFile,
 			err:     nil,
 			output:  &output.Output{PolicyCheck: evaluator.CheckResults{}},
 			defFunc: mockNewPipelineDefinitionFile,
 		},
 		{
-			name:    "validation fails on bad path",
-			fpath:   "bad",
-			err:     fmt.Errorf("fpath '%s' does not exist", "bad"),
+			name:    "validation fails on empty directory",
+			fpath:   emptyDir,
+			err:     fmt.Errorf("the directory %v contained no files", emptyDir),
 			output:  nil,
 			defFunc: mockNewPipelineDefinitionFile,
 		},
 		{
-			name:    "evaluator fails",
-			fpath:   "good",
+			name:    "validation fails on bad path",
+			fpath:   badPath,
+			err:     fmt.Errorf("unable to parse the provided definition file: %v", badPath),
+			output:  nil,
+			defFunc: mockNewPipelineDefinitionFile,
+		},
+		{
+			name:    "valid file, but evaluator fails",
+			fpath:   validFile,
 			err:     errors.New("Evaluator error"),
 			output:  nil,
 			defFunc: badMockNewPipelineDefinitionFile,
 		},
+		{
+			name:    "validation succeeds with json input",
+			fpath:   "{\"json\": 1}",
+			err:     nil,
+			output:  &output.Output{PolicyCheck: evaluator.CheckResults{}},
+			defFunc: mockNewPipelineDefinitionFile,
+		},
+		{
+			name:    "validation succeeds with yaml input",
+			fpath:   "kind: task",
+			err:     nil,
+			output:  &output.Output{PolicyCheck: evaluator.CheckResults{}},
+			defFunc: mockNewPipelineDefinitionFile,
+		},
+		{
+			name:    "validation fails with only an array of strings as yaml",
+			fpath:   "- test1\n- test2",
+			err:     fmt.Errorf("unable to parse the provided definition file: %v", "- test1\n- test2"),
+			output:  nil,
+			defFunc: mockNewPipelineDefinitionFile,
+		},
 	}
 
-	ctx := utils.WithFS(context.Background(), afero.NewOsFs())
+	appFS := afero.NewMemMapFs()
+	errEmptyDir := appFS.MkdirAll(emptyDir, 0777)
+	assert.NoError(t, errEmptyDir)
+	errDir := appFS.MkdirAll(nonEmptyDir, 0777)
+	assert.NoError(t, errDir)
+	errFile := afero.WriteFile(appFS, validFile, []byte("data"), 0777)
+	assert.NoError(t, errFile)
+	ctx := utils.WithFS(context.Background(), appFS)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			def_file = tt.defFunc
-			output, err := ValidateDefinition(ctx, tt.fpath, []source.PolicySource{})
+			definitionFile = tt.defFunc
+			output, err := ValidateDefinition(ctx, tt.fpath, []source.PolicySource{}, []string{})
 			assert.Equal(t, tt.err, err)
 			assert.Equal(t, tt.output, output)
 		})

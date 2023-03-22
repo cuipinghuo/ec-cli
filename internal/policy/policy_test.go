@@ -22,13 +22,14 @@ import (
 	"context"
 	"crypto"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	hd "github.com/MakeNowJust/heredoc"
+	"github.com/ghodss/yaml"
 	ecc "github.com/hacbs-contract/enterprise-contract-controller/api/v1alpha1"
-	cosignSig "github.com/sigstore/cosign/pkg/signature"
+	cosignSig "github.com/sigstore/cosign/v2/pkg/signature"
 	sigstoreSig "github.com/sigstore/sigstore/pkg/signature"
 	"github.com/stretchr/testify/assert"
 
@@ -42,18 +43,6 @@ CTeemlLBj+GVwnrnTgS1ow2jxgOgNFs0ADh2UfqHQqxeXFmphmsiAxtOxA==
 `
 
 const testRekorUrl = "https://example.com/api"
-
-type FakeKubernetesClient struct {
-	policy     ecc.EnterpriseContractPolicySpec
-	fetchError bool
-}
-
-func (c *FakeKubernetesClient) FetchEnterpriseContractPolicy(ctx context.Context, ref string) (*ecc.EnterpriseContractPolicy, error) {
-	if c.fetchError {
-		return nil, errors.New("no fetching for you")
-	}
-	return &ecc.EnterpriseContractPolicy{Spec: c.policy}, nil
-}
 
 func TestNewPolicy(t *testing.T) {
 	timeNowStr := "2022-11-23T16:30:00Z"
@@ -69,27 +58,53 @@ func TestNewPolicy(t *testing.T) {
 		expected    *policy
 	}{
 		{
-			name:      "simple inline",
+			name:      "simple JSON inline",
 			policyRef: toJson(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey}),
 			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
 				PublicKey: testPublicKey}, effectiveTime: &timeNow, choosenTime: timeNowStr},
 		},
 		{
-			name:      "inline with public key overwrite",
+			name:      "simple YAML inline",
+			policyRef: toYAML(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey}),
+			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
+				PublicKey: testPublicKey}, effectiveTime: &timeNow, choosenTime: timeNowStr},
+		},
+		{
+			name:      "JSON inline with public key overwrite",
 			policyRef: toJson(&ecc.EnterpriseContractPolicySpec{PublicKey: "ignored"}),
 			publicKey: testPublicKey,
 			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
 				PublicKey: testPublicKey}, effectiveTime: &timeNow, choosenTime: timeNowStr},
 		},
 		{
-			name:      "inline with rekor URL",
+			name:      "YAML inline with public key overwrite",
+			policyRef: toYAML(&ecc.EnterpriseContractPolicySpec{PublicKey: "ignored"}),
+			publicKey: testPublicKey,
+			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
+				PublicKey: testPublicKey}, effectiveTime: &timeNow, choosenTime: timeNowStr},
+		},
+		{
+			name:      "JSON inline with rekor URL",
 			policyRef: toJson(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey, RekorUrl: testRekorUrl}),
 			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
 				PublicKey: testPublicKey, RekorUrl: testRekorUrl}, effectiveTime: &timeNow, choosenTime: timeNowStr},
 		},
 		{
-			name:      "inline with rekor URL overwrite",
+			name:      "YAML inline with rekor URL",
+			policyRef: toYAML(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey, RekorUrl: testRekorUrl}),
+			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
+				PublicKey: testPublicKey, RekorUrl: testRekorUrl}, effectiveTime: &timeNow, choosenTime: timeNowStr},
+		},
+		{
+			name:      "JSON inline with rekor URL overwrite",
 			policyRef: toJson(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey, RekorUrl: "ignored"}),
+			rekorUrl:  testRekorUrl,
+			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
+				PublicKey: testPublicKey, RekorUrl: testRekorUrl}, effectiveTime: &timeNow, choosenTime: timeNowStr},
+		},
+		{
+			name:      "YAML inline with rekor URL overwrite",
+			policyRef: toYAML(&ecc.EnterpriseContractPolicySpec{PublicKey: testPublicKey, RekorUrl: "ignored"}),
 			rekorUrl:  testRekorUrl,
 			expected: &policy{EnterpriseContractPolicySpec: ecc.EnterpriseContractPolicySpec{
 				PublicKey: testPublicKey, RekorUrl: testRekorUrl}, effectiveTime: &timeNow, choosenTime: timeNowStr},
@@ -137,7 +152,7 @@ func TestNewPolicy(t *testing.T) {
 			ctx := context.Background()
 			// Setup an fake client to simulate external connections.
 			if c.k8sResource != nil {
-				ctx = kubernetes.WithClient(ctx, &FakeKubernetesClient{policy: *c.k8sResource})
+				ctx = kubernetes.WithClient(ctx, &FakeKubernetesClient{Policy: *c.k8sResource})
 			}
 			got, err := NewPolicy(ctx, c.policyRef, c.rekorUrl, c.publicKey, timeNowStr)
 			assert.NoError(t, err)
@@ -166,7 +181,16 @@ func TestNewPolicyFailures(t *testing.T) {
 		},
 		{
 			name:       "invalid inline JSON",
-			policyRef:  "{invalid json}",
+			policyRef:  `{"invalid": "json""}`,
+			errorCause: "unable to parse",
+		},
+		{
+			name: "invalid inline YAML",
+			policyRef: hd.Doc(`
+				---
+				invalid: yaml
+				  spam:
+				`),
 			errorCause: "unable to parse",
 		},
 		{
@@ -180,7 +204,7 @@ func TestNewPolicyFailures(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
-			ctx = kubernetes.WithClient(ctx, &FakeKubernetesClient{fetchError: c.k8sError})
+			ctx = kubernetes.WithClient(ctx, &FakeKubernetesClient{FetchError: c.k8sError})
 			got, err := NewPolicy(ctx, c.policyRef, "", "", "")
 			assert.Nil(t, got)
 			assert.ErrorContains(t, err, c.errorCause)
@@ -200,6 +224,8 @@ func TestCheckOpts(t *testing.T) {
 	cases := []struct {
 		name            string
 		rekorUrl        string
+		rekorPublicKey  string
+		rekorLogId      string
 		publicKey       string
 		remotePublicKey string
 		err             string
@@ -218,12 +244,22 @@ func TestCheckOpts(t *testing.T) {
 			publicKey:       "k8s://test/cosign-public-key",
 			remotePublicKey: testPublicKey,
 		},
+		{
+			name:           "with rekor public key",
+			rekorUrl:       testRekorUrl,
+			rekorLogId:     "5c88613c1a35d9fbf61144a6762502d594d9433c065af8d0b375f4bda16464b8",
+			rekorPublicKey: testPublicKey,
+			publicKey:      testPublicKey,
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
 			ctx = withSignatureClient(ctx, &FakeCosignClient{publicKey: c.remotePublicKey})
+			if c.rekorPublicKey != "" {
+				t.Setenv("REKOR_PUBLIC_KEY", c.rekorPublicKey)
+			}
 			p, err := NewPolicy(ctx, "", c.rekorUrl, c.publicKey, Now)
 			if c.err != "" {
 				assert.Empty(t, p)
@@ -239,6 +275,14 @@ func TestCheckOpts(t *testing.T) {
 				assert.NotNil(t, opts.RekorClient)
 			} else {
 				assert.Nil(t, opts.RekorClient)
+			}
+
+			if c.rekorPublicKey != "" {
+				assert.NotNil(t, opts.RekorPubKeys)
+				_, present := opts.RekorPubKeys.Keys[c.rekorLogId]
+				assert.True(t, present, "Expecting specific log id based on the provided public key")
+			} else {
+				assert.Nil(t, opts.RekorPubKeys)
 			}
 
 			assert.NotEmpty(t, opts.SigVerifier)
@@ -341,4 +385,12 @@ func toJson(policy *ecc.EnterpriseContractPolicySpec) string {
 		panic(fmt.Errorf("invalid JSON: %w", err))
 	}
 	return string(newInline)
+}
+
+func toYAML(policy *ecc.EnterpriseContractPolicySpec) string {
+	inline, err := yaml.Marshal(policy)
+	if err != nil {
+		panic(fmt.Errorf("invalid YAML: %w", err))
+	}
+	return string(inline)
 }
