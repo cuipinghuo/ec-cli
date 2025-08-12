@@ -696,6 +696,7 @@ func TestIsConformant(t *testing.T) {
 			expectErr:  true,
 		},
 	}
+	// Sealights debugging log
 	fmt.Println("Hello Sealights!")
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
