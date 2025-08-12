@@ -696,7 +696,7 @@ func TestIsConformant(t *testing.T) {
 			expectErr:  true,
 		},
 	}
-
+	fmt.Println("Hello Sealights!")
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p := &policy{}
