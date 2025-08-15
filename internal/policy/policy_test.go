@@ -1202,7 +1202,7 @@ func TestValidatePolicy(t *testing.T) {
 			description: "Should fail validation when policy contains invalid fields",
 		},
 	}
-
+	fmt.Println("Hello Sealights!")
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
