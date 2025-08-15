@@ -38,7 +38,7 @@ jobs:
   Initialize:
     runs-on: ubuntu-latest
     env:
-      SEALIGHTS_LOG_LEVEL: none
+      SEALIGHTS_LOG_LEVEL: debug
     outputs:
       bsid: ${{ steps.sealights-scan.outputs.bsid }}
     steps:
@@ -122,7 +122,7 @@ jobs:
         id: sealights-scan
         run: |
           echo "[Sealights] Running the SeaLights scan"
-          ./slcli scan --bsid buildSessionId.txt  --path-to-scanner ./slgoagent --workspacepath ./ --scm git --scmBaseUrl https://github.com/conforma/cli.git --scmVersion "0" --scmProvider github
+          #./slcli scan --bsid buildSessionId.txt  --path-to-scanner ./slgoagent --workspacepath ./ --scm git --scmBaseUrl https://github.com/conforma/cli.git --scmVersion "0" --scmProvider github
           echo bsid=$(< buildSessionId.txt) | tee -a "$GITHUB_OUTPUT"
       - name: clean all SeaLights secret stuff
         run: |
@@ -165,7 +165,7 @@ jobs:
     needs: [Initialize, Test-SL]
     env:
       BSID: ${{ needs.Initialize.outputs.bsid }}
-      SEALIGHTS_LOG_LEVEL: none
+      SEALIGHTS_LOG_LEVEL: debug
       SEALIGHTS_CONNECTION_TIMEOUT: 120s
     steps:
       - name: Restore workspace
@@ -185,7 +185,7 @@ jobs:
 
       - name: Acceptance test
         env:
-          SEALIGHTS_LOG_LEVEL: none
+          SEALIGHTS_LOG_LEVEL: debug
           DOCKER_BUILDKIT: 1
           COMPOSE_DOCKER_CLI_BUILD: 1
         run: make acceptance-sealights
